@@ -1,0 +1,6 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+httpx>=0.27
+beautifulsoup4>=4.12
+cryptography>=42
+pytest>=8

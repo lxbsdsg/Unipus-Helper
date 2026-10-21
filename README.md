@@ -1,0 +1,235 @@
+# Unipus Helper · Python + Web UI
+
+U校园（新视野大学英语）自动学习工具，采用 **Python + FastAPI + 浏览器 UI** 实现。
+
+> 请只在个人学习场景中使用。不要用于考试、测评或任何要求独立完成的场合。使用前请阅读文末免责声明。
+
+---
+
+## 功能
+
+- 账号登录（SSO），支持多任务并行。
+- 自动读取课程、教程、必修任务与学习进度。
+- 自动获取答案并提交：单选题、选词填空、填空、阅读、学习生词、简答题、翻译题、观看视频、排序题、写作题。
+- 任务控制：开始、暂停、恢复、停止、移除。
+- 多课程 / 多教程时在浏览器中选择。
+- 实时日志面板与网络请求面板（方法、状态、耗时、请求/响应详情）。
+- 一键导出脱敏的问题报告（zip）。
+- 深色 / 浅色主题，跟随系统或手动切换。
+- 提交限流（每分钟 5 次）与 0 分自动暂停保护。
+
+## 快速开始
+
+### 环境要求
+
+- Python 3.12 或更高版本。
+- Windows 10/11（推荐）、macOS 或 Linux。
+
+### 命令行启动（cmd）
+
+在项目目录打开 cmd，执行：
+
+```bat
+cd /d C:\Users\12650\Desktop\git
+run.bat
+```
+
+参数会原样透传给程序，例如只启动服务、不自动打开浏览器：
+
+```bat
+run.bat --no-browser
+run.bat --no-browser --port 8765
+```
+
+已经装好依赖时，也可以直接调用模块：
+
+```bat
+.venv\Scripts\python.exe -m unipus_web --no-browser
+```
+
+终端会持续显示运行日志；按 `Ctrl+C` 停止服务后，窗口不会立即关闭，方便查看最后的输出。
+
+### cmd 备选模式（--cli）
+
+默认启动 Web UI。如果浏览器不可用，或者你更习惯在终端里操作，可以使用备选模式：
+
+```bat
+run-cli.bat
+```
+
+等价于：
+
+```bat
+run.bat --cli
+```
+
+凭据可以用参数或环境变量提供（不会写入日志）：
+
+```bat
+set UNIPUS_USERNAME=你的账号
+set UNIPUS_PASSWORD=你的密码
+run.bat --cli
+```
+
+有多个课程 / 教程时会列出编号让你选择；加 `--yes` 自动选第一个，适合脚本或重复执行。运行中按 `Ctrl+C` 停止任务。
+
+脚本里不想被任何提示阻塞时，加 `--no-prompt`：缺少凭据或遇到多课程会直接返回失败，而不是等待输入。
+
+```bat
+run.bat --cli --no-prompt --yes
+```
+
+### Windows 双击启动
+
+双击 `run.bat`。脚本会自动创建 `.venv`、安装依赖并启动，浏览器会打开 <http://127.0.0.1:8765/>。
+
+### macOS / Linux
+
+```bash
+chmod +x run.sh
+./run.sh
+```
+
+### 手动启动
+
+```bash
+python -m venv .venv
+# Windows
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m unipus_web
+# macOS / Linux
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m unipus_web
+```
+
+### 命令行参数
+
+| 参数 | 说明 |
+|---|---|
+| `--port 8765` | 指定端口；被占用时会自动在 8765–8799 之间寻找空闲端口 |
+| `--no-browser` | 不自动打开浏览器 |
+| `--no-multi-question` | 关闭实验性的多小题提交 |
+| `--proxy http://127.0.0.1:7890` | 为 U校园请求设置代理 |
+| `--host 127.0.0.1` | 监听地址，默认只允许本机 |
+| `--cli` | 终端备选模式，不启动 Web UI |
+| `--username` / `--password` | CLI 模式的账号密码 |
+| `--yes` | CLI 模式自动选择第一个课程/教程 |
+| `--no-prompt` | CLI 模式不交互提问；凭据缺失或多课程时直接失败 |
+
+## 使用流程
+
+1. 打开页面，点击「添加任务」。
+2. 输入 U校园账号密码，或选择已保存的账号。
+3. 勾选「登录成功后保存到本机」可下次免输密码（Windows DPAPI 加密）。
+4. 登录成功后任务进入「待开始」，点击「开始」。
+5. 如果账号下有多个课程 / 教程，任务会变成「需要操作」，点击「选择教程」。
+6. 在任务行查看实时进度；出错时描述会标红，日志面板有完整原因。
+
+## 安全设计
+
+- 服务默认只监听 `127.0.0.1`，不对外网开放。
+- 校验 `Host` 头，拒绝非本机来源，降低 DNS rebinding 风险。
+- 密码不会写入日志、网络面板、问题报告或浏览器 `localStorage`。
+- 「已保存账号」由服务端解密后直接登录，密码不会发送到浏览器。
+- Windows 上使用 DPAPI 加密凭据，仅当前系统用户可解密。
+- 报告导出会自动剔除登录请求、用户信息请求和学习进度请求，并脱敏账号、姓名、手机号、Cookie、Authorization 和密码字段。
+
+## 已知限制
+
+- **多小题提交是实验性功能。** 该路径尚未在真实账号上验证，默认开启，可通过 `--no-multi-question` 关闭。
+- 不支持 `review & check`、评论 / 讨论、上传文件、多选题；遇到这些题型会跳过，并在日志中记录原因。
+- 不处理登录验证码；遇到验证码会登录失败并给出提示。
+- 程序直接提交答案，**不会产生学习时长**。部分学校会查看学习时长，请自行评估。
+- 课程是否在有效期内、任务是否开放，取决于 U校园服务端；程序只做基础时间窗判断。
+- 未编写联网集成测试。仓库提供只读冒烟脚本，可用自己的账号验证登录链路。
+
+### 只读冒烟脚本
+
+```bash
+# Windows
+set UNIPUS_USERNAME=你的账号
+set UNIPUS_PASSWORD=你的密码
+.venv\Scripts\python.exe scripts\smoke_login.py
+
+# macOS / Linux
+UNIPUS_USERNAME=... UNIPUS_PASSWORD=... .venv/bin/python scripts/smoke_login.py
+```
+
+脚本只执行「登录 + 拉取课程列表」，不会提交任何答案。
+
+## 常见问题
+
+**双击 `run.bat` 没反应？**
+确认已安装 Python 3.12+ 并加入 PATH。可以在命令行运行 `python --version` 检查。
+
+**提示「端口 8765-8799 全部被占用」？**
+关闭其他占用端口的程序，或用 `--port` 指定其他端口（程序只会在 8765–8799 内自动寻找）。
+
+**任务显示「已完成」但必修知识点没全部完成？**
+不支持的题型会被跳过。打开日志面板搜索「skipped」查看具体原因，或到 U校园网页手动完成。
+
+**提示「本次得分为 0，已自动暂停」？**
+说明该题的提交逻辑可能不适用于当前题型，或服务端判分逻辑变化。请到 U校园后台核对该题后，在界面中手动恢复；若反复出现，请导出报告反馈。
+
+**密码保存在哪里？**
+默认在用户目录的 `.unipus_helper/credentials.dat`，Windows 下由 DPAPI 加密。可通过环境变量 `UNIPUS_DATA_DIR` 修改目录。
+
+## 开发
+
+```bash
+.venv/Scripts/python.exe -m pytest        # Windows
+.venv/bin/python -m pytest                # macOS / Linux
+```
+
+当前测试覆盖：加密与 JWT、答案解密、HTML 转文本、课程树、单元进度、答案抽取、提交体、凭据存储、状态机、学习流程、任务管理器、报告脱敏、HTTP API、前端契约。全部测试不联网。
+
+### 目录结构
+
+```
+unipus_web/
+├── app.py                # FastAPI 路由、WebSocket、Host 校验
+├── __main__.py           # CLI 与端口探测
+├── config.py             # 域名、常量、数据目录
+├── crypto.py             # JWT、AES 解密、HTML → 文本、字符清洗
+├── credentials.py        # DPAPI / AES-GCM 凭据存储
+├── events.py             # 线程 → asyncio 事件总线
+├── logging_setup.py      # 内存日志缓冲
+├── network_log.py        # 网络请求录制与脱敏
+├── models.py             # 数据模型与宽松取值
+├── api/
+│   ├── client.py         # U校园 HTTP 客户端
+│   └── errors.py         # 异常层级
+├── core/
+│   ├── course_detail.py  # 课程树解析
+│   ├── unit_situation.py # 单元进度解析
+│   ├── answer.py         # 答案解析
+│   ├── submit.py         # 提交体构造
+│   ├── task.py           # 任务状态机
+│   ├── learn.py          # 学习主流程
+│   ├── manager.py        # 任务管理器
+│   └── reporter.py       # 报告导出
+└── web/
+    ├── index.html
+    ├── style.css
+    └── app.js
+```
+
+## 健壮性设计
+
+- 多小题每题独立解析和提交，答案互不污染。
+- 题型索引越界时回落到最后一个已知题型，不中断任务。
+- 单元进度缺少节点时跳过并记录警告。
+- 任务时间表优先读取 `strategies` 层级，回退到叶子节点，时间窗校验实际生效。
+- 课程资源列表为空时任务进入 ERROR，并给出可读描述。
+- generation token 保证停止后立即重启只有一个线程写入任务。
+- 报告扩展名与实际格式统一为 `.zip`。
+- 报告脱敏覆盖用户名中的 `-` 等特殊字符。
+- 所有网络请求都在后台线程执行，不阻塞界面或请求处理。
+- 提交响应缺失或为字符串编码时按失败处理。
+- 后端返回非 JSON / 5xx 时给出可读错误。
+
+更多设计与实施细节见 `docs/superpowers/`。
+
+## 免责声明
+
+本项目仅供学习与研究使用，完全开源。使用本程序产生的一切后果由使用者自行承担，与作者无关。请勿用于任何牟利或商业用途，请勿在考试、测评等要求独立完成的严肃场合使用。请遵守所在学校的规定与 U校园的服务条款。
