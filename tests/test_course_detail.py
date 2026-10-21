@@ -85,3 +85,16 @@ def test_section_nodes_do_not_require_url():
     )
     course = CourseDetail.from_json(data)
     assert course.get_node("s1").role.value == "section"
+
+
+def test_to_dict_serialises_tree_with_types():
+    course = CourseDetail.from_json(COURSE)
+    data = course.to_dict()
+    assert data["name"] == "大英"
+    unit = data["units"][0]
+    assert unit["role"] == "unit"
+    leaf = unit["children"][0]
+    assert leaf["id"] == "t1"
+    assert leaf["bases"] == ["single-choice"]
+    assert leaf["question_num"] == 3
+    assert "children" not in leaf

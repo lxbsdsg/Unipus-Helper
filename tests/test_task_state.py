@@ -168,3 +168,81 @@ def test_stop_during_user_operation_raises():
         raised = type(exc).__name__ == "TaskStopped"
     assert raised is True
     assert task.status == Status.READY
+
+
+def test_snapshot_reports_practice_mode():
+    task = make_task()
+    assert task.snapshot()["practice_mode"] == "required"
+
+
+def test_choose_practice_releases_waiting_worker():
+    from unipus_web.core.task import UserOperation
+
+    task = make_task()
+    task._begin_user_operation(UserOperation.CHOOSE_PRACTICE)
+    assert task.status == Status.NEED_OPERATION
+    assert task.user_operation == UserOperation.CHOOSE_PRACTICE
+
+    outcome = []
+
+    def worker():
+        task.wait_for_user_operation()
+        outcome.append(list(task.selected_task_ids))
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    time.sleep(0.05)
+    task.choose_practice(["t1", "t2"])
+    thread.join(timeout=1.0)
+
+    assert outcome == [["t1", "t2"]]
+    assert task.status == Status.RUNNING
+    assert task.user_operation is None
+
+
+def test_stop_during_practice_selection_raises():
+    from unipus_web.core.task import UserOperation
+
+    task = make_task()
+    task._begin_user_operation(UserOperation.CHOOSE_PRACTICE)
+
+    def stopper():
+        time.sleep(0.05)
+        task.request_stop()
+
+    threading.Thread(target=stopper, daemon=True).start()
+    try:
+        task.wait_for_user_operation()
+        raised = False
+    except Exception as exc:
+        raised = type(exc).__name__ == "TaskStopped"
+    assert raised is True
+
+
+def test_resume_restores_pending_practice_selection():
+    from unipus_web.core.task import UserOperation
+
+    task = make_task()
+    task._begin_user_operation(UserOperation.CHOOSE_PRACTICE)
+    task.request_pause()
+    assert task.status == Status.PAUSED
+
+    task.request_resume()
+    assert task.status == Status.NEED_OPERATION
+
+
+def test_begin_user_operation_keeps_paused_status():
+    from unipus_web.core.task import UserOperation
+
+    task = make_task()
+    task.set_status(Status.RUNNING)
+    task.request_pause()
+    assert task.status == Status.PAUSED
+
+    task._begin_user_operation(
+        UserOperation.CHOOSE_PRACTICE, generation=task.generation
+    )
+    assert task.status == Status.PAUSED
+
+    task.request_resume()
+    assert task.status == Status.NEED_OPERATION

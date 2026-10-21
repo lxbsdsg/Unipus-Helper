@@ -125,6 +125,28 @@
     </form>
   </dialog>
 
+  <!-- 全目录刷题 -->
+  <dialog id="catalog-dialog" class="dialog dialog-wide">
+    <form id="catalog-form" class="dialog-form">
+      <header class="dialog-head">
+        <h2>全目录刷题</h2>
+        <button type="button" class="icon-btn" data-close aria-label="关闭">×</button>
+      </header>
+      <div class="catalog-tools">
+        <span id="catalog-summary" class="section-meta">已选 0 题</span>
+        <button type="button" class="btn btn-ghost btn-sm" id="catalog-select-all">全选未完成</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="catalog-clear">清空</button>
+      </div>
+      <div id="catalog-tree" class="catalog-tree" role="tree" aria-label="题目目录"></div>
+      <p class="hint">已完成的题目不可选；整选单元/小节会自动包含其中未完成的题目。</p>
+      <p id="catalog-error" class="form-error" role="alert" hidden></p>
+      <footer class="dialog-foot">
+        <button type="button" class="btn btn-ghost" data-close>取消</button>
+        <button type="submit" class="btn btn-primary" id="catalog-start">开始刷题</button>
+      </footer>
+    </form>
+  </dialog>
+
   <!-- 任务管理 -->
   <dialog id="manage-dialog" class="dialog">
     <div class="dialog-form">

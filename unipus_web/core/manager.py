@@ -123,6 +123,14 @@ class TaskManager:
         self.bus.publish("task.updated", task.snapshot())
         return ok
 
+    def start_catalog(self, task_id: str) -> bool:
+        task = self.get(task_id)
+        if task is None:
+            return False
+        ok = task.start_catalog()
+        self.bus.publish("task.updated", task.snapshot())
+        return ok
+
     def pause(self, task_id: str) -> bool:
         task = self.get(task_id)
         if task is None:
@@ -151,8 +159,9 @@ class TaskManager:
             return False
         if task.status is Status.INITIALIZING:
             return False
+        mode = task.practice_mode
         task.request_stop()
-        return task.start()
+        return task.start(practice_mode=mode)
 
     def choose_course(self, task_id: str, course_id: int, resource_id: int) -> bool:
         task = self.get(task_id)
@@ -165,6 +174,13 @@ class TaskManager:
         if resource is None:
             raise ValueError("教程不存在")
         task.choose_course(course, resource)
+        return True
+
+    def choose_practice(self, task_id: str, task_ids: list[str]) -> bool:
+        task = self.get(task_id)
+        if task is None:
+            return False
+        task.choose_practice(task_ids)
         return True
 
     # ------------------------------------------------------------ 查询

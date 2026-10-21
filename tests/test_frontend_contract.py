@@ -16,10 +16,21 @@ def test_required_elements_and_endpoints_exist():
         "empty-state",
         "log-list",
         "network-list",
+        "catalog-dialog",
+        "catalog-tree",
+        "catalog-select-all",
     ]:
         assert selector in html, f"缺少元素：{selector}"
 
-    for endpoint in ["/api/tasks", "/api/logs", "/api/network", "/api/report", "/ws"]:
+    for endpoint in [
+        "/api/tasks",
+        "/api/logs",
+        "/api/network",
+        "/api/report",
+        "/ws",
+        "/catalog",
+        "/catalog/choose",
+    ]:
         assert endpoint in js, f"缺少接口调用：{endpoint}"
 
     assert "localStorage" in js

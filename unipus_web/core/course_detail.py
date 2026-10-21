@@ -123,12 +123,47 @@ class Node:
     link_type: str = "unknown"
 
 
+def is_answerable(node: Node, *, allow_multi_question: bool = True) -> bool:
+    """叶子节点是否属于当前程序可以作答的任务。"""
+    if node.children or not node.id:
+        return False
+    if node.role not in (Role.GROUP, Role.LINK):
+        return False
+    if not node.bases:
+        return False
+    if any(qtype in INVALID_TYPES for qtype in node.bases):
+        return False
+    # 与 _learn_task 的规则保持一致：单一题型；多小题受配置开关控制
+    if len(set(node.bases)) != 1:
+        return False
+    if node.question_num > 1 and not allow_multi_question:
+        return False
+    return True
+
+
+def _node_to_dict(node: Node) -> dict:
+    data = {
+        "id": node.id,
+        "role": node.role.value,
+        "caption": node.caption,
+        "name": node.name,
+        "question_num": node.question_num,
+        "bases": [qtype.value for qtype in node.bases],
+        "tab_type": node.tab_type,
+        "link_type": node.link_type,
+    }
+    if node.children:
+        data["children"] = [_node_to_dict(child) for child in node.children]
+    return data
+
+
 class CourseDetail:
     def __init__(self, name: str, type_: str, units: list[Node]) -> None:
         self.name = name
         self.type = type_
         self.units = units
         self.node_index: dict[str, Node] = {}
+        self.unit_of: dict[str, str] = {}
         self._start_times: dict[str, int] = {}
         self._end_times: dict[str, int] = {}
 
@@ -151,11 +186,13 @@ class CourseDetail:
         )
         for element in root.get("units") or []:
             node = Node()
-            course._traverse(node, element, course.node_index)
+            course._traverse(node, element, course.node_index, "")
             course.units.append(node)
         return course
 
-    def _traverse(self, node: Node, element: Any, index: dict[str, Node]) -> None:
+    def _traverse(
+        self, node: Node, element: Any, index: dict[str, Node], parent_unit: str
+    ) -> None:
         data = lenient_obj(element)
         node.id = as_str(data.get("id") or data.get("url"))
         node.role = Role.from_raw(as_str(data.get("role")))
@@ -165,8 +202,10 @@ class CourseDetail:
             node.url = as_str(data.get("url"), "Unknown url")
             node.ref_out = as_str(data.get("ref-out"), "Unknown ref-out")
 
+        current_unit = node.id if node.role is Role.UNIT and node.id else parent_unit
         if node.id:
             index[node.id] = node
+            self.unit_of[node.id] = current_unit
 
         children = data.get("children")
         if isinstance(children, list):
@@ -174,7 +213,7 @@ class CourseDetail:
             for child_element in children:
                 child = Node()
                 node.children.append(child)
-                self._traverse(child, child_element, index)
+                self._traverse(child, child_element, index, current_unit)
         else:
             node.question_num = as_int(data.get("question_num"))
             raw_base = as_str(data.get("base"), "unknown")
@@ -182,6 +221,15 @@ class CourseDetail:
             node.tab_type = as_str(data.get("tab_type"), "unknown")
             if node.role is Role.LINK:
                 node.link_type = as_str(data.get("linkType"), "unknown")
+
+    # ------------------------------------------------------------- 目录
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "type": self.type,
+            "units": [_node_to_dict(node) for node in self.units],
+        }
 
     # ------------------------------------------------------------- 查询
 

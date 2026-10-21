@@ -7,7 +7,13 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 
-from ..api.errors import TaskStopped, UnipusError, UnsupportedError
+from ..api.errors import (
+    AuthError,
+    NetworkError,
+    TaskStopped,
+    UnipusError,
+    UnsupportedError,
+)
 from ..config import MAX_SUBMITS_PER_MINUTE
 from ..crypto import decrypt_answer
 from ..models import (
@@ -23,6 +29,7 @@ from .course_detail import (
     PRESET_MODES,
     CourseDetail,
     QuestionType,
+    is_answerable,
 )
 from .submit import create_submit_body
 from .unit_situation import UnitSituation
@@ -36,6 +43,19 @@ class LearnSummary:
     skipped_tasks: int = 0
     completed_units: int = 0
     skipped_reasons: list[str] = field(default_factory=list)
+
+
+@dataclass
+class CourseContext:
+    """一次学习流程共享的课程信息，必修与全目录两种模式复用。"""
+
+    course_instance_id: str
+    resource_id: int
+    strategy_id: int
+    course_name: str
+    course: CourseDetail
+    required_map: dict[str, list[str]]
+
 
 
 class SubmitThrottle:
@@ -68,19 +88,8 @@ def _skip(control, summary: LearnSummary, reason: str) -> None:
     logger.info("Task skipped: %s", reason)
 
 
-def learn_course(
-    control,
-    client,
-    resource: CourseResource,
-    *,
-    allow_multi_question: bool = True,
-) -> LearnSummary:
-    summary = LearnSummary()
-    throttle = SubmitThrottle()
-    user = control.user
-    if user is None:
-        raise UnipusError("尚未登录，无法开始学习。")
-
+def load_course_context(control, client, resource: CourseResource) -> CourseContext:
+    """拉取教程信息、完整课程树与老师勾选的必修任务。"""
     control.checkpoint()
     control.set_description("正在获取教程信息")
     info = client.get_course_resource_info(str(resource.id))
@@ -116,6 +125,35 @@ def learn_course(
             required_map[unit_id] = (
                 [as_str(t) for t in tasks] if isinstance(tasks, list) else []
             )
+
+    return CourseContext(
+        course_instance_id=course_instance_id,
+        resource_id=resource_id,
+        strategy_id=strategy_id,
+        course_name=course_name,
+        course=course,
+        required_map=required_map,
+    )
+
+
+def learn_course(
+    control,
+    client,
+    resource: CourseResource,
+    *,
+    allow_multi_question: bool = True,
+) -> LearnSummary:
+    summary = LearnSummary()
+    throttle = SubmitThrottle()
+    user = control.user
+    if user is None:
+        raise UnipusError("尚未登录，无法开始学习。")
+
+    context = load_course_context(control, client, resource)
+    course = context.course
+    course_instance_id = context.course_instance_id
+    resource_id = context.resource_id
+    required_map = context.required_map
 
     control.checkpoint()
     control.set_description("正在查询学习进度")
@@ -160,6 +198,186 @@ def learn_course(
             throttle=throttle,
         ):
             summary.completed_units += 1
+
+    return summary
+
+
+def _walk_situation(nodes, result: dict[str, float]) -> None:
+    for node in nodes:
+        if node.node_id:
+            result[node.node_id] = node.finish_progress
+        _walk_situation(node.children, result)
+
+
+def _finish_progress_by_node(
+    control, client, context: CourseContext
+) -> tuple[dict[str, float], set[str]]:
+    """逐单元拉取学习进度，合并成 nodeId -> finishProgress。
+
+    返回 (进度, 状态未知的单元 id 集合)。未知单元的题目不会被当作未完成。
+    """
+    user = control.user
+    if user is None:
+        raise UnipusError("尚未登录，无法加载题目目录。")
+
+    result: dict[str, float] = {}
+    unknown: set[str] = set()
+    for unit in context.course.units:
+        if not unit.id:
+            continue
+        control.checkpoint()
+        try:
+            response = client.get_unit_task_situation(
+                unit.id, context.resource_id, user.app_user_id, user.sso_id
+            )
+        except (AuthError, NetworkError):
+            raise
+        except Exception as exc:
+            logger.warning("Failed to load situation for unit %s: %s", unit.id, exc)
+            unknown.add(unit.id)
+            continue
+        if not response.get("success", True):
+            logger.warning("Unit %s situation response not successful", unit.id)
+            unknown.add(unit.id)
+            continue
+        situation = UnitSituation.parse(response)
+        _walk_situation(situation.nodes, result)
+    return result, unknown
+
+
+def _annotate_catalog(
+    nodes,
+    progress: dict[str, float],
+    required_ids: set[str],
+    course: CourseDetail,
+    *,
+    allow_multi_question: bool,
+    unit_unknown: bool = False,
+) -> None:
+    for data in nodes or []:
+        node_id = as_str(data.get("id"))
+        children = data.get("children")
+        if children:
+            _annotate_catalog(
+                children,
+                progress,
+                required_ids,
+                course,
+                allow_multi_question=allow_multi_question,
+                unit_unknown=unit_unknown,
+            )
+            data["required"] = False
+            data["answerable"] = False
+            data["selectable"] = False
+            data["status_known"] = not unit_unknown
+            data["finish_progress"] = 0.0
+            continue
+
+        node = course.get_node(node_id)
+        answerable = node is not None and is_answerable(
+            node, allow_multi_question=allow_multi_question
+        )
+        known = not unit_unknown and node_id in progress
+        finish = float(progress.get(node_id, 0.0))
+        data["required"] = node_id in required_ids
+        data["answerable"] = answerable
+        data["status_known"] = known
+        data["finish_progress"] = finish
+        data["selectable"] = answerable and known and finish < 100.0
+
+
+def build_catalog(
+    control,
+    client,
+    context: CourseContext,
+    *,
+    allow_multi_question: bool = True,
+) -> dict:
+    """完整课程目录 + 每道题的完成状态与必修标记。"""
+    control.checkpoint()
+    control.set_description("正在加载题目目录")
+    progress, unknown_units = _finish_progress_by_node(control, client, context)
+    required_ids = {
+        task_id for tasks in context.required_map.values() for task_id in tasks
+    }
+    tree = context.course.to_dict()
+    for unit_data in tree.get("units") or []:
+        unit_id = as_str(unit_data.get("id"))
+        _annotate_catalog(
+            [unit_data],
+            progress,
+            required_ids,
+            context.course,
+            allow_multi_question=allow_multi_question,
+            unit_unknown=unit_id in unknown_units,
+        )
+    return {"tree": tree}
+
+
+def learn_selected_tasks(
+    control,
+    client,
+    context: CourseContext,
+    task_ids: list[str],
+    *,
+    progress: dict[str, float] | None = None,
+    allow_multi_question: bool = True,
+) -> LearnSummary:
+    """只刷用户勾选的题目；已完成或状态未知的题目直接跳过。"""
+    summary = LearnSummary()
+    throttle = SubmitThrottle()
+    user = control.user
+    if user is None:
+        raise UnipusError("尚未登录，无法开始学习。")
+    if progress is None:
+        progress, _ = _finish_progress_by_node(control, client, context)
+
+    # 按单元分组，先初始化该单元的时间窗，保证 _learn_task 的校验生效
+    ordered = list(dict.fromkeys(as_str(raw) for raw in task_ids if raw))
+    groups: dict[str, list[str]] = {}
+    for task_id in ordered:
+        if task_id:
+            groups.setdefault(context.course.unit_of.get(task_id, ""), []).append(
+                task_id
+            )
+
+    for unit_id, ids in groups.items():
+        control.checkpoint()
+        if unit_id:
+            try:
+                payload = client.get_task_time_info(
+                    context.course_instance_id, user.open_id, unit_id
+                )
+                context.course.init_task_times(payload)
+            except (AuthError, NetworkError, UnipusError):
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Failed to init task times for unit %s: %s", unit_id, exc
+                )
+
+        for task_id in ids:
+            control.checkpoint()
+            if context.course.get_node(task_id) is None:
+                _skip(control, summary, f"课程树中缺少节点 {task_id}")
+                continue
+            if task_id not in progress:
+                _skip(control, summary, f"任务 {task_id} 完成状态未知，跳过")
+                continue
+            if progress[task_id] >= 100.0:
+                _skip(control, summary, f"任务 {task_id} 已完成，跳过")
+                continue
+            _learn_task(
+                control,
+                client,
+                context.course,
+                task_id,
+                context.course_instance_id,
+                context.resource_id,
+                allow_multi_question=allow_multi_question,
+                summary=summary,
+                throttle=throttle,
+            )
 
     return summary
 
@@ -276,24 +494,22 @@ def _learn_task(
         _skip(control, summary, f"任务 {task_id} 没有题型信息")
         return False
 
-    distinct = list(dict.fromkeys(types))
-    if len(distinct) != 1:
-        _skip(control, summary, f"任务 {task_id} 包含多种题型，暂不支持")
-        return False
-
-    unsupported = [t for t in types if t in INVALID_TYPES]
-    if unsupported:
-        _skip(
-            control,
-            summary,
-            f"任务 {task_id} 含不支持的题型：{unsupported[0].value}",
-        )
-        return False
-
     question_num = max(1, node.question_num)
-    if question_num > 1 and not allow_multi_question:
-        _skip(control, summary, f"任务 {task_id} 为多小题任务，已按配置跳过")
+    # 与全目录刷题的 selectable 使用同一判定，避免两边规则漂移
+    if not is_answerable(node, allow_multi_question=allow_multi_question):
+        distinct = list(dict.fromkeys(types))
+        unsupported = [t for t in types if t in INVALID_TYPES]
+        if unsupported:
+            reason = f"任务 {task_id} 含不支持的题型：{unsupported[0].value}"
+        elif len(distinct) != 1:
+            reason = f"任务 {task_id} 包含多种题型，暂不支持"
+        elif question_num > 1 and not allow_multi_question:
+            reason = f"任务 {task_id} 为多小题任务，已按配置跳过"
+        else:
+            reason = f"任务 {task_id} 不可作答"
+        _skip(control, summary, reason)
         return False
+
     if question_num > 1:
         logger.warning(
             "[experimental] multi-question submit task=%s questions=%s",
