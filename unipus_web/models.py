@@ -171,6 +171,7 @@ class TaskSnapshot:
     user_name: str = ""
     school_name: str = ""
     user_operation: str | None = None
+    practice_mode: str = "required"
     courses: list[dict] = field(default_factory=list)
     warning: str | None = None
     error: str | None = None

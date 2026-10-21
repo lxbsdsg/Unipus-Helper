@@ -40,6 +40,7 @@ class Status(str, Enum):
 
 class UserOperation(str, Enum):
     CHOOSE_COURSE = "CHOOSE_COURSE"
+    CHOOSE_PRACTICE = "CHOOSE_PRACTICE"
 
 
 class TaskControl(Protocol):
@@ -96,6 +97,11 @@ class Task:
         self.warning: str | None = None
         self.error: str | None = None
 
+        # 刷题方式：required = 老师勾选，catalog = 全目录自选
+        self.practice_mode = "required"
+        self.catalog: dict | None = None
+        self.selected_task_ids: list[str] = []
+
         self._cond = threading.Condition()
         self._stop_event = threading.Event()
         self._generation = 0
@@ -139,12 +145,15 @@ class Task:
             logger.exception("Task %s initialization failed", self.task_id)
             self._fail(f"任务初始化失败：{type(exc).__name__} - {exc}")
 
-    def start(self) -> bool:
+    def start(self, *, practice_mode: str = "required") -> bool:
         with self._cond:
             if self.status is not Status.READY:
                 return False
             if self._worker is not None and self._worker.is_alive():
                 return False
+            self.practice_mode = practice_mode
+            self.catalog = None
+            self.selected_task_ids = []
             self._generation += 1
             generation = self._generation
             self._stop_event.clear()
@@ -163,6 +172,10 @@ class Task:
         )
         self._worker.start()
         return True
+
+    def start_catalog(self) -> bool:
+        """以全目录自选方式开始；进入选择前会先加载目录。"""
+        return self.start(practice_mode="catalog")
 
     def _run(self, generation: int) -> None:
         self._tls.generation = generation
@@ -236,10 +249,43 @@ class Task:
         # 延迟导入，避免 Task 与 Learn 的循环依赖
         from .learn import learn_course
 
+        if self.practice_mode == "catalog":
+            return self._prepare_and_practice_catalog(generation, resource)
+
         return learn_course(
             self,
             self.client,
             resource,
+            allow_multi_question=self.allow_multi_question,
+        )
+
+    def _prepare_and_practice_catalog(self, generation: int, resource):
+        from .learn import build_catalog, learn_selected_tasks, load_course_context
+
+        self._update(gen=generation, description="正在加载题目目录")
+        context = load_course_context(self, self.client, resource)
+        result = build_catalog(
+            self,
+            self.client,
+            context,
+            allow_multi_question=self.allow_multi_question,
+        )
+        # 旧线程不能在检查 generation 之前覆盖新任务的目录
+        self._set_catalog_if_current(generation, result["tree"])
+
+        self._begin_user_operation(
+            UserOperation.CHOOSE_PRACTICE, generation=generation
+        )
+        self.wait_for_user_operation()
+        if self._stop_event.is_set() or self._is_stale(generation):
+            raise TaskStopped()
+
+        self._update(gen=generation, description="正在刷选中的题目")
+        return learn_selected_tasks(
+            self,
+            self.client,
+            context,
+            list(self.selected_task_ids),
             allow_multi_question=self.allow_multi_question,
         )
 
@@ -253,27 +299,51 @@ class Task:
             if not course.resources:
                 raise UnipusError("该课程下没有可学习的教程。")
 
-        self._begin_user_operation()
+        self._begin_user_operation(generation=generation)
         self.wait_for_user_operation()
         if self._stop_event.is_set() or self._is_stale(generation):
             raise TaskStopped()
 
     # ------------------------------------------------------------ 用户交互
 
-    def _begin_user_operation(self) -> None:
+    def _set_catalog_if_current(self, generation: int, tree: dict) -> None:
         with self._cond:
+            if generation != self._generation or self._stop_event.is_set():
+                raise TaskStopped()
+            self.catalog = tree
+
+    def _begin_user_operation(
+        self,
+        operation: UserOperation = UserOperation.CHOOSE_COURSE,
+        *,
+        generation: int | None = None,
+    ) -> None:
+        with self._cond:
+            if generation is not None and (
+                generation != self._generation or self._stop_event.is_set()
+            ):
+                raise TaskStopped()
             self._awaiting_user = True
             self._user_op_done = False
-            self.user_operation = UserOperation.CHOOSE_COURSE
-            self.status = Status.NEED_OPERATION
-            self.description = "请选择要学习的教程"
+            self.user_operation = operation
+            # 用户在这之前已暂停时保留暂停状态，恢复后再回到选择界面
+            if self.status is not Status.PAUSED:
+                self.status = Status.NEED_OPERATION
+            self.description = (
+                "请选择要学习的教程"
+                if operation is UserOperation.CHOOSE_COURSE
+                else "请选择要刷的题目"
+            )
             self._cond.notify_all()
         self._emit_change()
 
     def wait_for_user_operation(self) -> None:
+        generation = self._current_generation()
         with self._cond:
             while not self._user_op_done:
-                if self._stop_event.is_set():
+                if self._stop_event.is_set() or (
+                    generation is not None and generation != self._generation
+                ):
                     raise TaskStopped()
                 self._cond.wait(0.5)
             self._awaiting_user = False
@@ -284,9 +354,23 @@ class Task:
             self.current_resource = resource
             self.name = f"{course.name} - {resource.name}"
             self._user_op_done = True
+            self.user_operation = None
             if self.status is Status.NEED_OPERATION:
                 self.status = Status.RUNNING
                 self.description = "已选择教程，继续学习"
+            self._cond.notify_all()
+        self._emit_change()
+
+    def choose_practice(self, task_ids: list[str]) -> None:
+        with self._cond:
+            self.selected_task_ids = [
+                str(task_id) for task_id in task_ids or [] if str(task_id)
+            ]
+            self._user_op_done = True
+            self.user_operation = None
+            if self.status is Status.NEED_OPERATION:
+                self.status = Status.RUNNING
+                self.description = "已选择题目，继续刷题"
             self._cond.notify_all()
         self._emit_change()
 
@@ -381,7 +465,7 @@ class Task:
             if self._stop_event.is_set() or self.status is Status.ERROR:
                 return
             if self.status is Status.PAUSED:
-                if self._awaiting_user and self.current_resource is None:
+                if self._awaiting_user and self.user_operation is not None:
                     self.status = Status.NEED_OPERATION
                 else:
                     self.status = Status.RUNNING
@@ -490,6 +574,7 @@ class Task:
                 user_operation=(
                     self.user_operation.value if self.user_operation else None
                 ),
+                practice_mode=self.practice_mode,
                 courses=[course.to_dict() for course in self.course_list],
                 warning=self.warning,
                 error=self.error,

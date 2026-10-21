@@ -77,3 +77,13 @@ def test_report_zip_redacts_password(tmp_path):
         assert {"logs.log", "networks.jsonl", "meta.json"} <= names
         joined = b"".join(archive.read(n) for n in names).decode("utf-8", "replace")
         assert "plain-pw" not in joined
+
+
+def test_restart_preserves_practice_mode(tmp_path):
+    manager = make_manager(tmp_path)
+    snapshot = manager.create_task(username="u", password="p")
+    task = manager._wait_ready(snapshot["id"], timeout=2)
+    task.practice_mode = "catalog"
+
+    assert manager.restart(snapshot["id"]) is True
+    assert task.practice_mode == "catalog"

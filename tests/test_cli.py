@@ -1,4 +1,10 @@
-from unipus_web.cli import flatten_choices, format_progress, parse_choice, run_cli
+from unipus_web.cli import (
+    flatten_catalog_items,
+    flatten_choices,
+    format_progress,
+    parse_choice,
+    run_cli,
+)
 from unipus_web.core.task import Status
 from unipus_web.models import Course
 
@@ -65,6 +71,7 @@ class FakeTask:
         self.description = ""
         self.completed = 0
         self.total = 0
+        self.catalog = None
         self.calls = []
         self._snapshots = [
             {
@@ -90,6 +97,14 @@ class FakeTask:
         self.calls.append("start")
         self.status = Status.RUNNING
         return True
+
+    def start_catalog(self):
+        self.calls.append("start_catalog")
+        self.status = Status.RUNNING
+        return True
+
+    def choose_practice(self, task_ids):
+        self.calls.append(("choose_practice", list(task_ids)))
 
     def request_stop(self):
         self.calls.append("stop")
@@ -131,3 +146,90 @@ def test_run_cli_rejects_missing_credentials():
         configure_logging=False,
     )
     assert code == 2
+
+
+CATALOG = {
+    "name": "c",
+    "units": [
+        {
+            "id": "u1",
+            "role": "unit",
+            "caption": "Unit 1",
+            "name": "Unit 1",
+            "children": [
+                {
+                    "id": "t1",
+                    "role": "link",
+                    "name": "Listening",
+                    "bases": ["single-choice"],
+                    "selectable": True,
+                    "finish_progress": 0,
+                },
+                {
+                    "id": "t2",
+                    "role": "link",
+                    "name": "Reading",
+                    "bases": ["single-choice"],
+                    "selectable": False,
+                    "finish_progress": 100,
+                },
+            ],
+        }
+    ],
+}
+
+
+class CatalogFakeTask(FakeTask):
+    def __init__(self):
+        super().__init__()
+        self.catalog = CATALOG
+        self._snapshots = [
+            {
+                "status": "RUNNING",
+                "description": "正在加载题目目录",
+                "completed": 0,
+                "total": 0,
+                "progress_percent": 0,
+            },
+            {
+                "status": "NEED_OPERATION",
+                "user_operation": "CHOOSE_PRACTICE",
+                "description": "请选择要刷的题目",
+                "completed": 0,
+                "total": 0,
+                "progress_percent": 0,
+            },
+            {
+                "status": "COMPLETED",
+                "description": "完成",
+                "completed": 1,
+                "total": 1,
+                "progress_percent": 100,
+            },
+        ]
+
+
+def test_flatten_catalog_items_keeps_only_selectable_leaves():
+    items = flatten_catalog_items(CATALOG)
+    assert [item["id"] for item in items] == ["t1"]
+    assert items[0]["path"] == "Unit 1 / Listening"
+
+
+def test_run_cli_catalog_auto_selects_unfinished_tasks():
+    task = CatalogFakeTask()
+    lines = []
+
+    code = run_cli(
+        username="u",
+        password="p",
+        assume_yes=True,
+        practice_mode="catalog",
+        task_factory=lambda **kwargs: task,
+        sleep=lambda _seconds: None,
+        out=lines.append,
+        configure_logging=False,
+    )
+
+    assert code == 0
+    assert "start_catalog" in task.calls
+    assert ("choose_practice", ["t1"]) in task.calls

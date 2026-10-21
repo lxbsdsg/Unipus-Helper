@@ -79,6 +79,11 @@ def main(argv: list[str] | None = None) -> int:
         "--yes", action="store_true", help="CLI 模式自动选择第一个课程/教程"
     )
     parser.add_argument(
+        "--catalog",
+        action="store_true",
+        help="CLI 模式：加载全部目录，自己选择未完成题目",
+    )
+    parser.add_argument(
         "--no-prompt",
         action="store_true",
         help="CLI 模式不交互提问；缺少凭据或多课程时直接失败",
@@ -95,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
             allow_multi_question=not args.no_multi_question,
             assume_yes=args.yes,
             allow_prompt=not args.no_prompt,
+            practice_mode="catalog" if args.catalog else "required",
         )
 
     if args.host not in ("127.0.0.1", "localhost", "::1"):

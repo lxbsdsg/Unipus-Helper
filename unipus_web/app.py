@@ -25,6 +25,7 @@ from .api.errors import ApiError, AuthError, NetworkError, UnipusError
 from .config import VERSION
 from .core.manager import TaskManager
 from .core.reporter import build_report
+from .core.task import Status, UserOperation
 from .credentials import CredentialStore
 from .events import EventBus
 from .logging_setup import LogStore, setup_logging
@@ -51,6 +52,10 @@ class CreateTaskRequest(BaseModel):
 class ChooseCourseRequest(BaseModel):
     course_id: int
     resource_id: int
+
+
+class ChoosePracticeRequest(BaseModel):
+    task_ids: list[str]
 
 
 class CredentialRequest(BaseModel):
@@ -198,6 +203,39 @@ def create_app(
             manager.choose_course(task_id, payload.course_id, payload.resource_id)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+        return Response(status_code=204)
+
+    # ------------------------------------------------------------ 全目录刷题
+
+    @app.post("/api/tasks/{task_id}/catalog", status_code=202)
+    def start_catalog(task_id: str):
+        require_task(task_id)
+        if not manager.start_catalog(task_id):
+            raise HTTPException(409, "任务当前无法开始全目录刷题")
+        return {"ok": True}
+
+    @app.get("/api/tasks/{task_id}/catalog")
+    def get_catalog(task_id: str):
+        task = require_task(task_id)
+        if task.catalog is None:
+            raise HTTPException(409, "题目目录尚未加载完成")
+        return task.catalog
+
+    @app.post("/api/tasks/{task_id}/catalog/choose", status_code=204)
+    def choose_practice(task_id: str, payload: ChoosePracticeRequest):
+        task = require_task(task_id)
+        if (
+            task.status is not Status.NEED_OPERATION
+            or task.user_operation is not UserOperation.CHOOSE_PRACTICE
+            or task.catalog is None
+        ):
+            raise HTTPException(409, "任务当前不在选择题目状态")
+        if not payload.task_ids:
+            raise HTTPException(400, "至少选择一道题")
+        task_ids = [task_id.strip() for task_id in payload.task_ids if task_id.strip()]
+        if not task_ids:
+            raise HTTPException(400, "至少选择一道题")
+        manager.choose_practice(task_id, task_ids)
         return Response(status_code=204)
 
     # ------------------------------------------------------------ 凭据

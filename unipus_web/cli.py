@@ -58,6 +58,57 @@ def prompt_choice(choices: list[tuple[Course, CourseResource]], out=print) -> in
     return selected
 
 
+def flatten_catalog_items(catalog: dict | None) -> list[dict]:
+    """把目录树展开成可刷的未完成题目列表。"""
+    items: list[dict] = []
+
+    def walk(nodes, path: list[str]) -> None:
+        for node in nodes or []:
+            label = (node.get("caption") or node.get("name") or node.get("id") or "").strip()
+            next_path = path + ([label] if label else [])
+            children = node.get("children")
+            if children:
+                walk(children, next_path)
+            elif node.get("selectable"):
+                items.append(
+                    {
+                        "id": node.get("id", ""),
+                        "path": " / ".join(next_path) or node.get("id", ""),
+                        "bases": node.get("bases") or [],
+                    }
+                )
+
+    walk((catalog or {}).get("units"), [])
+    return items
+
+
+def prompt_practice(items: list[dict], out=print) -> list[str]:
+    out("可刷的未完成题目：")
+    for index, item in enumerate(items, 1):
+        types = ", ".join(item.get("bases") or [])
+        out(f"  [{index}] {item['path']}  ({types})")
+    try:
+        text = input(
+            f"选择题目编号（逗号分隔，all 全选，回车默认全选）: "
+        ).strip()
+    except EOFError:
+        text = ""
+    if not text or text.lower() == "all":
+        return [item["id"] for item in items]
+
+    selected: list[str] = []
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        value = parse_choice(part, len(items))
+        if value is None:
+            out(f"忽略无效编号：{part.strip()}")
+            continue
+        selected.append(items[value]["id"])
+    return list(dict.fromkeys(selected))
+
+
 def _prompt_credentials(
     username: str | None, password: str | None, allow_prompt: bool
 ) -> tuple[str, str]:
@@ -99,6 +150,7 @@ def run_cli(
     allow_multi_question: bool = True,
     assume_yes: bool = False,
     allow_prompt: bool = True,
+    practice_mode: str = "required",
     task_factory: Callable[..., Task] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     out: Callable[[str], None] = print,
@@ -106,6 +158,7 @@ def run_cli(
 ) -> int:
     """在终端里完成登录 → 选课 → 学习 → 退出。
 
+    practice_mode：required（老师勾选，默认）或 catalog（全目录自选）。
     返回码：0 完成，1 失败，2 缺少凭据/需要选择，130 用户中断。
     """
     if configure_logging:
@@ -137,33 +190,56 @@ def run_cli(
             return 1
         out(f"登录成功：{task.name or username}")
 
-        if not task.start():
+        starter = task.start_catalog if practice_mode == "catalog" else task.start
+        if not starter():
             out("任务无法启动。")
             return 1
         out("任务已启动，按 Ctrl+C 停止。")
 
         last_line = None
-        prompted = False
+        course_prompted = False
+        practice_prompted = False
         snapshot = task.snapshot()
         while True:
             snapshot = task.snapshot()
             status = snapshot.get("status")
 
-            if status == "NEED_OPERATION" and not prompted:
-                choices = flatten_choices(task.course_list)
-                if not choices:
-                    out("没有可选择的课程，任务已停止。")
-                    task.request_stop()
-                    return 1
-                index = 0
-                if not assume_yes:
-                    if not allow_prompt:
-                        out("存在多个课程/教程，请在终端运行或加 --yes 自动选择第一个。")
+            if status == "NEED_OPERATION":
+                operation = snapshot.get("user_operation")
+                if operation == "CHOOSE_PRACTICE" and not practice_prompted:
+                    items = flatten_catalog_items(getattr(task, "catalog", None))
+                    if not items:
+                        out("没有可刷的未完成题目，任务已停止。")
                         task.request_stop()
                         return 1
-                    index = prompt_choice(choices, out)
-                task.choose_course(*choices[index])
-                prompted = True
+                    if assume_yes or not allow_prompt:
+                        selected_ids = [item["id"] for item in items]
+                        out(f"已自动选择全部 {len(selected_ids)} 道未完成题目。")
+                    else:
+                        selected_ids = prompt_practice(items, out)
+                    if not selected_ids:
+                        out("没有选择任何题目，任务已停止。")
+                        task.request_stop()
+                        return 1
+                    task.choose_practice(selected_ids)
+                    practice_prompted = True
+                elif not course_prompted:
+                    choices = flatten_choices(task.course_list)
+                    if not choices:
+                        out("没有可选择的课程，任务已停止。")
+                        task.request_stop()
+                        return 1
+                    index = 0
+                    if not assume_yes:
+                        if not allow_prompt:
+                            out(
+                                "存在多个课程/教程，请在终端运行或加 --yes 自动选择第一个。"
+                            )
+                            task.request_stop()
+                            return 1
+                        index = prompt_choice(choices, out)
+                    task.choose_course(*choices[index])
+                    course_prompted = True
 
             line = format_progress(snapshot)
             if line != last_line:

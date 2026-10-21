@@ -1157,3 +1157,124 @@ select {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ---------------------------------------------------------------- 全目录刷题 */
+
+.catalog-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.catalog-tools .section-meta {
+  margin-right: auto;
+}
+
+.catalog-tree {
+  max-height: 52vh;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.catalog-row {
+  padding-left: calc(var(--depth, 0) * 18px);
+}
+
+.catalog-group > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.catalog-group > summary::-webkit-details-marker {
+  display: none;
+}
+
+.catalog-group > summary::before {
+  content: "▸";
+  width: 10px;
+  flex: none;
+  color: var(--ink-3);
+  font-size: 11px;
+  transition: transform 0.15s ease;
+}
+
+.catalog-group[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.catalog-group > summary:hover {
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+}
+
+.catalog-leaf-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px 5px calc(var(--depth, 0) * 18px + 28px);
+  border-radius: 6px;
+}
+
+.catalog-leaf-row:hover {
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+}
+
+.catalog-check {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.catalog-check:disabled {
+  cursor: not-allowed;
+}
+
+.catalog-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.catalog-group > summary .catalog-name {
+  font-weight: 600;
+}
+
+.catalog-meta,
+.catalog-count {
+  margin-left: auto;
+  color: var(--ink-3);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.catalog-leaf-row.is-complete .catalog-name {
+  color: var(--ink-3);
+  text-decoration: line-through;
+}
+
+.catalog-leaf-row.is-unsupported {
+  opacity: 0.55;
+}
+
+@media (max-width: 640px) {
+  .catalog-leaf-row {
+    flex-wrap: wrap;
+  }
+
+  .catalog-meta {
+    width: 100%;
+    margin-left: 22px;
+  }
+}

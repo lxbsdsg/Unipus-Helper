@@ -1,6 +1,11 @@
 import json
 
-from unipus_web.core.learn import learn_course
+from unipus_web.core.learn import (
+    build_catalog,
+    learn_course,
+    learn_selected_tasks,
+    load_course_context,
+)
 from unipus_web.models import CourseResource
 
 
@@ -52,6 +57,7 @@ class FakeClient:
         self.unit_situation = unit_situation or {"value": {"list": []}}
         self.answer_json = answer_json
         self.course_list = course_list or []
+        self.time_payload = {"rt": {"leafs": {}}}
         self.submitted_body = None
 
     def get_course_resource_info(self, resource_id):
@@ -88,7 +94,7 @@ class FakeClient:
         }
 
     def get_task_time_info(self, *args):
-        return {"rt": {"leafs": {}}}
+        return self.time_payload
 
     def get_unit_task_situation(self, *args):
         return self.unit_situation
@@ -284,3 +290,240 @@ def test_multi_question_answers_are_submitted_independently_and_progress_refresh
     second = json.loads(body["quesDatas"][1]["answer"])
     assert [c["value"] for c in first["children"]] == [["A"]]
     assert [c["value"] for c in second["children"]] == [["B"]]
+
+
+CATALOG_UNITS = {
+    "name": "c",
+    "units": [
+        {
+            "id": "u1",
+            "role": "unit",
+            "caption": "Unit 1",
+            "name": "Unit 1",
+            "children": [
+                {
+                    "id": "t1",
+                    "role": "link",
+                    "name": "Listening",
+                    "url": "x",
+                    "ref-out": "y",
+                    "question_num": 1,
+                    "base": "single-choice",
+                    "tab_type": "text",
+                    "linkType": "task",
+                },
+                {
+                    "id": "t2",
+                    "role": "link",
+                    "name": "Reading",
+                    "url": "x",
+                    "ref-out": "y",
+                    "question_num": 1,
+                    "base": "single-choice",
+                    "tab_type": "text",
+                    "linkType": "task",
+                },
+                {
+                    "id": "t3",
+                    "role": "link",
+                    "name": "Discuss",
+                    "url": "x",
+                    "ref-out": "y",
+                    "question_num": 1,
+                    "base": "discussion",
+                    "tab_type": "text",
+                    "linkType": "task",
+                },
+            ],
+        }
+    ],
+}
+
+
+def make_catalog_client(answer_json="[]"):
+    return FakeClient(
+        units_json=json.dumps(CATALOG_UNITS),
+        required=[{"unitId": "u1", "requiredTask": ["t1"]}],
+        unit_situation={
+            "value": {
+                "list": [
+                    {
+                        "nodeId": "u1",
+                        "role": "unit",
+                        "children": [
+                            {"nodeId": "t1", "role": "link", "finishProgress": 0},
+                            {"nodeId": "t2", "role": "link", "finishProgress": 100},
+                            {"nodeId": "t3", "role": "link", "finishProgress": 0},
+                        ],
+                    }
+                ]
+            }
+        },
+        answer_json=answer_json,
+    )
+
+
+def test_build_catalog_merges_progress_and_required_flags():
+    client = make_catalog_client()
+    control = FakeControl()
+    context = load_course_context(control, client, CourseResource(id=1))
+    catalog = build_catalog(control, client, context)
+
+    leaves = {node["id"]: node for node in catalog["tree"]["units"][0]["children"]}
+    assert leaves["t1"]["required"] is True
+    assert leaves["t1"]["selectable"] is True
+    assert leaves["t2"]["required"] is False
+    assert leaves["t2"]["finish_progress"] == 100.0
+    assert leaves["t2"]["selectable"] is False
+    # discussion 属于不支持题型，可展示但不可选
+    assert leaves["t3"]["answerable"] is False
+    assert leaves["t3"]["selectable"] is False
+    assert leaves["t1"]["status_known"] is True
+    assert leaves["t2"]["status_known"] is True
+
+
+def test_learn_selected_tasks_only_submits_unfinished_selection():
+    answer_json = json.dumps(
+        [
+            {
+                "id": 11,
+                "answer": json.dumps({"children": [{"answers": ["A"]}]}),
+            }
+        ]
+    )
+    client = make_catalog_client(answer_json=answer_json)
+    control = FakeControl()
+    context = load_course_context(control, client, CourseResource(id=1))
+
+    summary = learn_selected_tasks(
+        control,
+        client,
+        context,
+        ["t1", "t2", "missing"],
+        progress={"t1": 0.0, "t2": 100.0, "t3": 0.0},
+    )
+
+    assert summary.submitted_tasks == 1
+    assert summary.skipped_tasks == 2
+    assert any("已完成" in reason for reason in summary.skipped_reasons)
+    assert any("缺少节点" in reason for reason in summary.skipped_reasons)
+    body = json.loads(client.submitted_body)
+    assert len(body["quesDatas"]) == 1
+
+
+def _single_leaf_client(base="single-choice", question_num=1):
+    units = {
+        "name": "c",
+        "units": [
+            {
+                "id": "u1",
+                "role": "unit",
+                "caption": "Unit 1",
+                "name": "Unit 1",
+                "children": [
+                    {
+                        "id": "t1",
+                        "role": "link",
+                        "name": "Task",
+                        "url": "x",
+                        "ref-out": "y",
+                        "question_num": question_num,
+                        "base": base,
+                        "tab_type": "text",
+                        "linkType": "task",
+                    }
+                ],
+            }
+        ],
+    }
+    return FakeClient(
+        units_json=json.dumps(units),
+        unit_situation={
+            "value": {
+                "list": [
+                    {
+                        "nodeId": "u1",
+                        "role": "unit",
+                        "children": [
+                            {"nodeId": "t1", "role": "link", "finishProgress": 0}
+                        ],
+                    }
+                ]
+            }
+        },
+    )
+
+
+def test_catalog_marks_mixed_type_task_unselectable():
+    client = _single_leaf_client(base="single-choice,translation")
+    control = FakeControl()
+    context = load_course_context(control, client, CourseResource(id=1))
+    catalog = build_catalog(control, client, context)
+    leaf = catalog["tree"]["units"][0]["children"][0]
+    assert leaf["answerable"] is False
+    assert leaf["selectable"] is False
+
+
+def test_catalog_respects_multi_question_flag():
+    client = _single_leaf_client(question_num=2)
+    control = FakeControl()
+    context = load_course_context(control, client, CourseResource(id=1))
+
+    disabled = build_catalog(
+        control, client, context, allow_multi_question=False
+    )
+    assert disabled["tree"]["units"][0]["children"][0]["selectable"] is False
+
+    enabled = build_catalog(control, client, context)
+    assert enabled["tree"]["units"][0]["children"][0]["selectable"] is True
+
+
+def test_catalog_marks_unknown_status_when_unit_progress_fails():
+    client = _single_leaf_client()
+    client.unit_situation = {"success": False, "value": {}}
+    control = FakeControl()
+    context = load_course_context(control, client, CourseResource(id=1))
+    catalog = build_catalog(control, client, context)
+    leaf = catalog["tree"]["units"][0]["children"][0]
+    assert leaf["status_known"] is False
+    assert leaf["selectable"] is False
+
+
+def test_catalog_marks_missing_leaf_status_unknown():
+    client = _single_leaf_client()
+    client.unit_situation = {
+        "success": True,
+        "value": {"list": [{"nodeId": "u1", "role": "unit", "children": []}]},
+    }
+    control = FakeControl()
+    context = load_course_context(control, client, CourseResource(id=1))
+    catalog = build_catalog(control, client, context)
+    leaf = catalog["tree"]["units"][0]["children"][0]
+    assert leaf["status_known"] is False
+    assert leaf["selectable"] is False
+
+
+def test_learn_selected_tasks_respects_task_time_window():
+    import time
+
+    answer_json = json.dumps(
+        [{"id": 11, "answer": json.dumps({"children": [{"answers": ["A"]}]})}]
+    )
+    client = make_catalog_client(answer_json=answer_json)
+    now = int(time.time())
+    client.time_payload = {
+        "rt": {
+            "leafs": {
+                "t1": {"strategies": {"start_time": now + 3600, "end_time": now + 7200}}
+            }
+        }
+    }
+    control = FakeControl()
+    context = load_course_context(control, client, CourseResource(id=1))
+
+    summary = learn_selected_tasks(
+        control, client, context, ["t1"], progress={"t1": 0.0}
+    )
+
+    assert summary.submitted_tasks == 0
+    assert any("不在学习时间" in reason for reason in summary.skipped_reasons)

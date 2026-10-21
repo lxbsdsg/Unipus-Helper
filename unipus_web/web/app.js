@@ -16,6 +16,24 @@ const STATUS = {
 
 const LEVEL_RANK = { DEBUG: 10, INFO: 20, WARNING: 30, ERROR: 40, CRITICAL: 50 };
 
+const TYPE_LABEL = {
+  'single-choice': '单选',
+  'material-banked-cloze': '选词填空',
+  short_answer: '简答',
+  translation: '翻译',
+  'text-learn': '课文学习',
+  discussion: '讨论',
+  input: '填空',
+  'video-point-read': '视频',
+  'rich-text-read': '阅读',
+  vocabulary: '生词',
+  sequence: '排序',
+  'basic-scoop-content': '内容学习',
+  'video-popup': '视频弹题',
+  writing: '写作',
+  __unknown__: '未知题型',
+};
+
 const state = {
   tasks: new Map(),
   credentials: [],
@@ -28,6 +46,11 @@ const state = {
   pendingRemember: new Map(),
   courseTaskId: null,
   courseSelection: { course: null, resource: null, courses: [] },
+  catalogTaskId: null,
+  catalogRequestId: 0,
+  catalog: null,
+  catalogLeavesById: new Map(),
+  catalogSelection: new Set(),
   activeTaskId: null,
   ws: null,
   reconnectDelay: 1000,
@@ -193,6 +216,7 @@ function taskControls(task) {
   switch (task.status) {
     case 'READY':
       controls.push(action('开始', 'start', 'btn btn-primary btn-sm'));
+      controls.push(action('全目录刷题', 'catalog', 'btn btn-ghost btn-sm'));
       break;
     case 'RUNNING':
       controls.push(action('暂停', 'pause'), action('停止', 'stop'));
@@ -203,9 +227,14 @@ function taskControls(task) {
     case 'WAITING':
       controls.push(action('暂停', 'pause'), action('停止', 'stop'));
       break;
-    case 'NEED_OPERATION':
-      controls.push(action('选择教程', 'choose', 'btn btn-primary btn-sm'), action('暂停', 'pause'));
+    case 'NEED_OPERATION': {
+      const practice = task.user_operation === 'CHOOSE_PRACTICE';
+      controls.push(
+        action(practice ? '选择题目' : '选择教程', practice ? 'catalog' : 'choose', 'btn btn-primary btn-sm')
+      );
+      controls.push(action('暂停', 'pause'));
       break;
+    }
     case 'ERROR':
     case 'COMPLETED':
       controls.push(action('重试', 'restart', 'btn btn-primary btn-sm'));
@@ -225,6 +254,15 @@ async function runTaskAction(taskId, action) {
   }
   if (action === 'choose') {
     openCourse(taskId);
+    return;
+  }
+  if (action === 'catalog') {
+    const task = state.tasks.get(taskId);
+    if (task && task.status === 'NEED_OPERATION') {
+      openCatalog(taskId);
+    } else {
+      startCatalog(taskId);
+    }
     return;
   }
   if (action === 'stop') {
@@ -279,6 +317,7 @@ function renderManage(task) {
   switch (task.status) {
     case 'READY':
       add('开始', 'start', 'btn btn-primary btn-sm');
+      add('全目录刷题', 'catalog', 'btn btn-ghost btn-sm');
       break;
     case 'RUNNING':
     case 'WAITING':
@@ -289,9 +328,15 @@ function renderManage(task) {
       add('恢复', 'resume', 'btn btn-primary btn-sm');
       add('停止', 'stop', 'btn btn-ghost btn-sm');
       break;
-    case 'NEED_OPERATION':
-      add('选择教程', 'choose', 'btn btn-primary btn-sm');
+    case 'NEED_OPERATION': {
+      const practice = task.user_operation === 'CHOOSE_PRACTICE';
+      add(
+        practice ? '选择题目' : '选择教程',
+        practice ? 'catalog' : 'choose',
+        'btn btn-primary btn-sm'
+      );
       break;
+    }
     case 'ERROR':
     case 'COMPLETED':
       add('重新开始', 'restart', 'btn btn-primary btn-sm');
@@ -316,6 +361,11 @@ async function manageAction(task, action) {
   }
   if (action === 'choose') {
     openCourse(task.id);
+    return;
+  }
+  if (action === 'catalog') {
+    if (task.status === 'NEED_OPERATION') openCatalog(task.id);
+    else startCatalog(task.id);
     return;
   }
   try {
@@ -408,6 +458,180 @@ function renderResourceOptions() {
     });
     box.append(node);
   }
+}
+
+/* ------------------------------------------------------------ 全目录刷题 */
+
+async function startCatalog(taskId) {
+  try {
+    await api(`/api/tasks/${encodeURIComponent(taskId)}/catalog`, { method: 'POST' });
+    toast('正在加载题目目录，完成后会提示选择题目', 'info');
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+async function openCatalog(taskId) {
+  const requestId = ++state.catalogRequestId;
+  state.catalogTaskId = taskId;
+  state.catalog = null;
+  state.catalogLeavesById = new Map();
+  state.catalogSelection = new Set();
+  $('#catalog-error').hidden = true;
+  $('#catalog-tree').textContent = '';
+  $('#catalog-summary').textContent = '正在加载目录…';
+  $('#catalog-start').disabled = true;
+
+  let tree;
+  try {
+    tree = await api(`/api/tasks/${encodeURIComponent(taskId)}/catalog`);
+  } catch (error) {
+    if (requestId === state.catalogRequestId) toast(error.message, 'error');
+    return;
+  }
+  // 并发的重复请求只渲染最后一次，避免覆盖已勾选内容
+  if (requestId !== state.catalogRequestId) return;
+
+  state.catalog = tree;
+  renderCatalogTree(tree);
+  $('#catalog-dialog').showModal();
+}
+
+function catalogLabel(node) {
+  return node.caption || node.name || node.id || '未命名';
+}
+
+let catalogKeySeq = 0;
+
+function catalogNodeKey(node) {
+  if (!node._key) node._key = node.id || `node-${++catalogKeySeq}`;
+  return node._key;
+}
+
+function indexCatalog(node) {
+  const leaves = [];
+  const children = node.children || [];
+  if (children.length) {
+    for (const child of children) leaves.push(...indexCatalog(child));
+  } else if (node.selectable) {
+    leaves.push(node.id);
+  }
+  const key = catalogNodeKey(node);
+  state.catalogLeavesById.set(key, leaves);
+  return leaves;
+}
+
+function renderCatalogTree(tree) {
+  const box = $('#catalog-tree');
+  box.textContent = '';
+  state.catalogLeavesById = new Map();
+  state.catalogSelection = new Set();
+
+  const units = (tree && tree.units) || [];
+  if (!units.length) {
+    box.append(el('div', 'saved-empty', '这个教程没有可用的题目目录'));
+    syncCatalogChecks();
+    return;
+  }
+
+  for (const unit of units) indexCatalog(unit);
+  for (const unit of units) box.append(renderCatalogNode(unit, 0));
+  syncCatalogChecks();
+}
+
+function renderCatalogNode(node, depth) {
+  const children = node.children || [];
+  const row = el('div', 'catalog-row');
+  row.style.setProperty('--depth', String(depth));
+
+  const checkbox = document.createElement('input');
+  checkbox.type = 'checkbox';
+  checkbox.className = 'catalog-check';
+  const nodeKey = catalogNodeKey(node);
+  checkbox.dataset.nodeId = nodeKey;
+  checkbox.setAttribute('aria-label', catalogLabel(node));
+
+  if (children.length) {
+    row.classList.add('catalog-group-row');
+    const leaves = state.catalogLeavesById.get(nodeKey) || [];
+    checkbox.disabled = leaves.length === 0;
+    const details = document.createElement('details');
+    details.className = 'catalog-group';
+    details.open = depth < 2;
+
+    const summary = document.createElement('summary');
+    summary.append(checkbox, el('span', 'catalog-name', catalogLabel(node)));
+    summary.append(el('span', 'catalog-count', `${leaves.length} 题`));
+
+    checkbox.addEventListener('click', (event) => event.stopPropagation());
+    checkbox.addEventListener('change', () => {
+      for (const leafId of leaves) {
+        if (checkbox.checked) state.catalogSelection.add(leafId);
+        else state.catalogSelection.delete(leafId);
+      }
+      syncCatalogChecks();
+    });
+
+    details.append(summary);
+    const childBox = el('div', 'catalog-children');
+    for (const child of children) childBox.append(renderCatalogNode(child, depth + 1));
+    details.append(childBox);
+    row.append(details);
+    return row;
+  }
+
+  const selectable = Boolean(node.selectable);
+  const finish = Number(node.finish_progress || 0);
+  checkbox.disabled = !selectable;
+  row.classList.add('catalog-leaf-row');
+  row.classList.toggle('is-complete', finish >= 100);
+  row.classList.toggle('is-unsupported', !selectable && finish < 100);
+
+  const types = (node.bases || []).map((raw) => TYPE_LABEL[raw] || raw).join('、');
+  const parts = [];
+  if (types) parts.push(types);
+  if (node.question_num > 1) parts.push(`${node.question_num} 小题`);
+  if (!node.status_known) parts.push('状态未知');
+  else parts.push(finish >= 100 ? '已完成' : selectable ? '未完成' : '不可刷');
+
+  checkbox.addEventListener('change', () => {
+    if (checkbox.checked) state.catalogSelection.add(node.id);
+    else state.catalogSelection.delete(node.id);
+    syncCatalogChecks();
+  });
+
+  row.append(checkbox, el('span', 'catalog-name', catalogLabel(node)));
+  row.append(el('span', 'catalog-meta', parts.join(' · ')));
+  return row;
+}
+
+function syncCatalogChecks() {
+  $$('.catalog-check', $('#catalog-tree')).forEach((checkbox) => {
+    const leaves = state.catalogLeavesById.get(checkbox.dataset.nodeId) || [];
+    if (!leaves.length) {
+      checkbox.checked = false;
+      checkbox.indeterminate = false;
+      checkbox.disabled = true;
+      return;
+    }
+    const selected = leaves.filter((leafId) => state.catalogSelection.has(leafId)).length;
+    checkbox.checked = selected === leaves.length;
+    checkbox.indeterminate = selected > 0 && selected < leaves.length;
+  });
+
+  const count = state.catalogSelection.size;
+  $('#catalog-summary').textContent = `已选 ${count} 题`;
+  $('#catalog-start').disabled = count === 0;
+}
+
+function selectAllCatalog() {
+  state.catalogSelection = new Set();
+  for (const unit of (state.catalog && state.catalog.units) || []) {
+    for (const leafId of state.catalogLeavesById.get(catalogNodeKey(unit)) || []) {
+      state.catalogSelection.add(leafId);
+    }
+  }
+  syncCatalogChecks();
 }
 
 /* ------------------------------------------------------------ 添加任务 */
@@ -823,10 +1047,41 @@ function openAddDialog() {
   $('#add-task-dialog').showModal();
 }
 
+async function submitCatalogForm(event) {
+  event.preventDefault();
+  const errorBox = $('#catalog-error');
+  errorBox.hidden = true;
+  const ids = [...state.catalogSelection];
+  if (!ids.length) {
+    errorBox.textContent = '至少选择一道题目';
+    errorBox.hidden = false;
+    return;
+  }
+
+  try {
+    await api(`/api/tasks/${encodeURIComponent(state.catalogTaskId)}/catalog/choose`, {
+      method: 'POST',
+      body: { task_ids: ids },
+    });
+    $('#catalog-dialog').close();
+    toast(`已选择 ${ids.length} 道题，开始刷题`, 'success');
+  } catch (error) {
+    errorBox.textContent = error.message;
+    errorBox.hidden = false;
+  }
+}
+
 function bindEvents() {
   $('#add-task').addEventListener('click', openAddDialog);
   $('#add-task-empty').addEventListener('click', openAddDialog);
   $('#add-form').addEventListener('submit', submitAddForm);
+
+  $('#catalog-form').addEventListener('submit', submitCatalogForm);
+  $('#catalog-select-all').addEventListener('click', selectAllCatalog);
+  $('#catalog-clear').addEventListener('click', () => {
+    state.catalogSelection = new Set();
+    syncCatalogChecks();
+  });
 
   $$('.seg').forEach((node) => {
     node.addEventListener('click', () => setAddMode(node.dataset.addMode));
