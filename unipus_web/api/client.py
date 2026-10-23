@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import time
+from http.cookiejar import Cookie
 from typing import Callable
 
 import httpx
@@ -36,6 +37,7 @@ class UnipusClient:
     ) -> None:
         self.task_id = task_id
         self._record = record
+        self._login_result: dict | None = None
         self._client = httpx.Client(
             proxy=proxy,
             timeout=timeout,
@@ -165,7 +167,70 @@ class UnipusClient:
         rs = data.get("rs")
         if not isinstance(rs, dict):
             raise AuthError(as_str(data.get("msg"), "账号或密码错误"))
+        self._login_result = rs
         return rs
+
+    def export_login_session(self) -> dict:
+        if self._login_result is None:
+            raise AuthError("还没有可保存的登录状态")
+        cookies = []
+        for cookie in self._client.cookies.jar:
+            cookies.append(
+                {
+                    "name": cookie.name,
+                    "value": cookie.value,
+                    "domain": cookie.domain,
+                    "path": cookie.path,
+                    "expires": cookie.expires,
+                    "secure": bool(cookie.secure),
+                }
+            )
+        return {
+            "version": 1,
+            "login_result": self._login_result,
+            "cookies": cookies,
+        }
+
+    def restore_login_session(self, session: dict) -> dict:
+        if session.get("version") != 1:
+            raise AuthError("保存的登录状态格式无效")
+        login_result = session.get("login_result")
+        cookies = session.get("cookies")
+        if not isinstance(login_result, dict) or not isinstance(cookies, list):
+            raise AuthError("保存的登录状态不完整")
+
+        restored = httpx.Cookies()
+        for cookie in cookies:
+            if not isinstance(cookie, dict) or not all(
+                key in cookie for key in ("name", "value")
+            ):
+                continue
+            domain = str(cookie.get("domain") or "")
+            expires = cookie.get("expires")
+            restored.jar.set_cookie(
+                Cookie(
+                    version=0,
+                    name=str(cookie["name"]),
+                    value=str(cookie["value"]),
+                    port=None,
+                    port_specified=False,
+                    domain=domain,
+                    domain_specified=True,
+                    domain_initial_dot=domain.startswith("."),
+                    path=str(cookie.get("path") or "/"),
+                    path_specified=True,
+                    secure=bool(cookie.get("secure")),
+                    expires=int(expires) if expires is not None else None,
+                    discard=expires is None,
+                    comment=None,
+                    comment_url=None,
+                    rest={},
+                    rfc2109=False,
+                )
+            )
+        self._client.cookies = restored
+        self._login_result = login_result
+        return login_result
 
     def get_user_info(self) -> dict:
         return self._json(

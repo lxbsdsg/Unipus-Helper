@@ -48,6 +48,33 @@ def test_login_without_rs_raises_auth_error():
         client.login("u1", "bad")
 
 
+def test_login_session_roundtrip_preserves_cookies():
+    login_result = {"openid": "o1", "jwt": "j1", "username": "u1"}
+
+    def handler(request):
+        if request.url.path.endswith("/login"):
+            return httpx.Response(
+                200,
+                headers={
+                    "set-cookie": (
+                        "sso=session-token; Domain=.unipus.cn; Path=/; "
+                        "Secure; HttpOnly"
+                    )
+                },
+                json={"code": "0", "rs": login_result},
+            )
+        assert request.headers.get("cookie") == "sso=session-token"
+        return httpx.Response(200, json={"success": True})
+
+    client = make_client(handler)
+    client.login("u1", "p1")
+    session = client.export_login_session()
+
+    restored_client = make_client(handler)
+    assert restored_client.restore_login_session(session) == login_result
+    restored_client.get_user_info()
+
+
 def test_non_json_response_raises_api_error():
     client = make_client(lambda r: httpx.Response(502, text="<html>bad gateway</html>"))
     with pytest.raises(ApiError):

@@ -14,7 +14,7 @@ import time
 from enum import Enum
 from typing import Callable, Protocol
 
-from ..api.errors import AuthError, NetworkError, TaskStopped, UnipusError
+from ..api.errors import ApiError, AuthError, NetworkError, TaskStopped, UnipusError
 from ..models import (
     Course,
     CourseResource,
@@ -69,13 +69,17 @@ class Task:
         on_warning: Callable[[str], None],
         on_error: Callable[[str], None],
         credential_id: str | None = None,
+        login_session: dict | None = None,
+        on_login_session: Callable[[dict], None] | None = None,
         allow_multi_question: bool = True,
     ) -> None:
         self.task_id = task_id
         self.username = username
         self.password = password
         self.credential_id = credential_id
+        self.login_session = login_session
         self.allow_multi_question = allow_multi_question
+        self._on_login_session = on_login_session
 
         self._client_factory = client_factory
         self._on_change = on_change
@@ -121,7 +125,18 @@ class Task:
         """后台线程调用：登录并拉取用户信息。"""
         try:
             self.client = self._client_factory(self.task_id)
-            rs = self.client.login(self.username, self.password or "")
+            restored_session = self.login_session is not None
+            try:
+                if self.login_session is None:
+                    rs = self.client.login(self.username, self.password or "")
+                else:
+                    rs = self.client.restore_login_session(self.login_session)
+                info = self.client.get_user_info()
+            except (ApiError, AuthError):
+                if not restored_session:
+                    raise
+                rs = self.client.login(self.username, self.password or "")
+                info = self.client.get_user_info()
             self.user = User(
                 username=as_str(rs.get("username"), self.username),
                 jwt=as_str(rs.get("jwt")),
@@ -136,6 +151,15 @@ class Task:
             self.name = " - ".join(
                 part for part in (self.user.school_name, self.user.name) if part
             ) or self.username
+            if self._on_login_session is not None:
+                try:
+                    self._on_login_session(self.client.export_login_session())
+                except Exception:
+                    logger.debug(
+                        "Task %s could not save its login session.",
+                        self.task_id,
+                        exc_info=True,
+                    )
             self._update(status=Status.READY, description="登录成功，未启动")
         except AuthError as exc:
             self._fail(str(exc))

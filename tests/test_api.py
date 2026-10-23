@@ -115,6 +115,9 @@ class FakeClient:
     def close(self):
         pass
 
+    def export_login_session(self):
+        return {"version": 1, "login_result": {"openid": "o"}, "cookies": []}
+
 
 def make_client():
     app = create_app(testing=True)
@@ -156,6 +159,25 @@ def test_credentials_never_return_password():
     body = client.get("/api/credentials").text
     assert "password" not in body
     assert '"p"' not in body
+
+
+def test_add_credential_can_capture_ready_task_login_session():
+    client = make_client()
+    task_id = client.post(
+        "/api/tasks", json={"username": "u", "password": "p"}
+    ).json()["id"]
+    task = client.app.state.manager._wait_ready(task_id, timeout=2)
+    assert task is not None
+
+    response = client.post(
+        "/api/credentials",
+        json={"username": "u", "password": "p", "task_id": task_id},
+    )
+
+    assert response.status_code == 201
+    credential_id = response.json()["id"]
+    assert client.app.state.credentials.get_login_session(credential_id)["version"] == 1
+    assert "session" not in client.get("/api/credentials").text
 
 
 def test_report_download_headers():

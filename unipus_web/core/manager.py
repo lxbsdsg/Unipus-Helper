@@ -51,15 +51,22 @@ class TaskManager:
         *,
         credential_id: str | None = None,
     ) -> dict:
+        login_session = None
         if credential_id:
             secret = self.credentials.get_secret(credential_id)
             if secret is None:
                 raise ValueError("已保存的账号不存在")
             username, password = secret
+            login_session = self.credentials.get_login_session(credential_id)
         if not username:
             raise ValueError("缺少用户名")
 
         task_id = f"task-{username}"
+        session_saver = None
+        if credential_id:
+            session_saver = lambda session, cid=credential_id: (
+                self.credentials.update_session(cid, session)
+            )
         with self._lock:
             if task_id in self._tasks:
                 raise ValueError("任务已存在")
@@ -72,6 +79,8 @@ class TaskManager:
                 on_warning=lambda message, tid=task_id: self._on_warning(tid, message),
                 on_error=lambda message, tid=task_id: self._on_error(tid, message),
                 credential_id=credential_id,
+                login_session=login_session,
+                on_login_session=session_saver,
                 allow_multi_question=self.allow_multi_question,
             )
             self._tasks[task_id] = task
@@ -84,6 +93,15 @@ class TaskManager:
             daemon=True,
         ).start()
         return task.snapshot()
+
+    def export_login_session(self, task_id: str, username: str) -> dict | None:
+        task = self.get(task_id)
+        if task is None or task.username != username or task.client is None:
+            return None
+        try:
+            return task.client.export_login_session()
+        except Exception:
+            return None
 
     def remove(self, task_id: str) -> bool:
         with self._lock:
