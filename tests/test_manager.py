@@ -5,6 +5,7 @@ import zipfile
 import pytest
 
 from unipus_web.credentials import CredentialStore
+from unipus_web.api.errors import AuthError
 from unipus_web.core.manager import TaskManager
 from unipus_web.core.reporter import build_report
 from unipus_web.events import EventBus
@@ -25,6 +26,9 @@ class FakeClient:
     def close(self):
         pass
 
+    def export_login_session(self):
+        return {"version": 1, "login_result": {}, "cookies": []}
+
 
 def make_manager(tmp_path):
     return TaskManager(
@@ -44,6 +48,71 @@ def test_create_task_from_credentials_then_remove(tmp_path):
     assert manager.get(snapshot["id"]).status.value == "READY"
     assert manager.remove(snapshot["id"]) is True
     assert manager.snapshots() == []
+
+
+def test_create_task_from_credentials_reuses_saved_login_session(tmp_path):
+    calls = {"restore": 0, "login": 0}
+
+    class SavedSessionClient:
+        def restore_login_session(self, session):
+            calls["restore"] += 1
+            return session["login_result"]
+
+        def login(self, username, password):
+            calls["login"] += 1
+            raise AssertionError("saved login state should avoid password login")
+
+        def get_user_info(self):
+            return {"value": {"userInfo": {}}}
+
+        def export_login_session(self):
+            return {"version": 1, "login_result": {}, "cookies": []}
+
+        def close(self):
+            pass
+
+    manager = make_manager(tmp_path)
+    manager.client_factory = lambda tid: SavedSessionClient()
+    credential = manager.credentials.add(
+        "u", "p", session={"version": 1, "login_result": {"openid": "o"}, "cookies": []}
+    )
+    snapshot = manager.create_task(credential_id=credential["id"])
+    task = manager._wait_ready(snapshot["id"], timeout=2)
+
+    assert task.status.value == "READY"
+    assert calls == {"restore": 1, "login": 0}
+
+
+def test_expired_saved_login_session_falls_back_to_password(tmp_path):
+    calls = {"login": 0}
+
+    class ExpiredSessionClient:
+        def restore_login_session(self, session):
+            raise AuthError("登录状态已过期")
+
+        def login(self, username, password):
+            calls["login"] += 1
+            return {"openid": "o", "jwt": "j", "username": username}
+
+        def get_user_info(self):
+            return {"value": {"userInfo": {}}}
+
+        def export_login_session(self):
+            return {"version": 1, "login_result": {}, "cookies": []}
+
+        def close(self):
+            pass
+
+    manager = make_manager(tmp_path)
+    manager.client_factory = lambda tid: ExpiredSessionClient()
+    credential = manager.credentials.add(
+        "u", "p", session={"version": 1, "login_result": {"openid": "old"}, "cookies": []}
+    )
+    snapshot = manager.create_task(credential_id=credential["id"])
+    task = manager._wait_ready(snapshot["id"], timeout=2)
+
+    assert task.status.value == "READY"
+    assert calls["login"] == 1
 
 
 def test_duplicate_task_raises(tmp_path):

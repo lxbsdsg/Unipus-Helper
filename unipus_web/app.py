@@ -62,6 +62,7 @@ class CredentialRequest(BaseModel):
     username: str
     password: str
     label: str = ""
+    task_id: str | None = None
 
 
 def create_app(
@@ -248,7 +249,24 @@ def create_app(
     def add_credential(payload: CredentialRequest):
         if not payload.username:
             raise HTTPException(422, "用户名不能为空")
-        return credentials.add(payload.username, payload.password, payload.label)
+        session = None
+        if payload.task_id:
+            task = manager.get(payload.task_id)
+            if task is None:
+                raise HTTPException(404, "任务不存在")
+            if task.username != payload.username:
+                raise HTTPException(400, "任务与要保存的账号不一致")
+            if task.status is not Status.READY:
+                raise HTTPException(409, "任务尚未登录成功")
+            session = manager.export_login_session(payload.task_id, payload.username)
+            if session is None:
+                raise HTTPException(422, "当前任务没有可保存的登录状态")
+        return credentials.add(
+            payload.username,
+            payload.password,
+            payload.label,
+            session=session,
+        )
 
     @app.delete("/api/credentials/{cred_id}", status_code=204)
     def delete_credential(cred_id: str):

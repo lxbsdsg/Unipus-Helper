@@ -24,10 +24,33 @@ def test_duplicate_username_updates_existing(tmp_path):
     assert store.get_secret(second["id"]) == ("u", "p2")
 
 
+def test_login_session_persistence_and_update(tmp_path):
+    path = tmp_path / "cred.dat"
+    store = CredentialStore(path)
+    item = store.add("u", "p", session={"version": 1, "cookies": []})
+    assert store.get_login_session(item["id"]) == {"version": 1, "cookies": []}
+
+    reloaded = CredentialStore(path)
+    assert reloaded.get_login_session(item["id"]) == {"version": 1, "cookies": []}
+    assert reloaded.update_session(item["id"], {"version": 1, "cookies": [{"name": "s"}]})
+    assert CredentialStore(path).get_login_session(item["id"]) == {
+        "version": 1,
+        "cookies": [{"name": "s"}],
+    }
+
+
 def test_list_never_exposes_password(tmp_path):
     store = CredentialStore(tmp_path / "cred.dat")
     store.add("u", "p")
     assert set(store.list()[0]) == {"id", "username", "label"}
+
+
+def test_credential_file_does_not_contain_plaintext_session(tmp_path):
+    path = tmp_path / "cred.dat"
+    CredentialStore(path).add(
+        "u", "p", session={"cookies": [{"name": "sso", "value": "session-token"}]}
+    )
+    assert b"session-token" not in path.read_bytes()
 
 
 def test_persistence_across_instances(tmp_path):

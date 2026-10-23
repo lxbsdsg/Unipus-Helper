@@ -188,12 +188,24 @@ class CredentialStore:
                 for item in self._items
             ]
 
-    def add(self, username: str, password: str, label: str = "") -> dict:
+    def add(
+        self,
+        username: str,
+        password: str,
+        label: str = "",
+        *,
+        session: dict | None = None,
+    ) -> dict:
         with self._lock:
             for item in self._items:
                 if item["username"] == username:
+                    session_changed = (
+                        session is not None or item.get("password") != password
+                    )
                     item["password"] = password
                     item["label"] = label or item.get("label", "")
+                    if session_changed:
+                        item["session"] = session or {}
                     self._save()
                     return {
                         "id": item["id"],
@@ -205,6 +217,7 @@ class CredentialStore:
                 "username": username,
                 "label": label,
                 "password": password,
+                "session": session or {},
             }
             self._items.append(item)
             self._save()
@@ -216,6 +229,23 @@ class CredentialStore:
                 if item["id"] == cred_id:
                     return item["username"], item["password"]
         return None
+
+    def get_login_session(self, cred_id: str) -> dict | None:
+        with self._lock:
+            for item in self._items:
+                if item["id"] == cred_id:
+                    return item.get("session") or None
+        return None
+
+    def update_session(self, cred_id: str, session: dict) -> bool:
+        with self._lock:
+            for item in self._items:
+                if item["id"] != cred_id:
+                    continue
+                item["session"] = session
+                self._save()
+                return True
+        return False
 
     def delete(self, cred_id: str) -> bool:
         with self._lock:

@@ -761,7 +761,12 @@ async function maybeRemember(task) {
   try {
     await api('/api/credentials', {
       method: 'POST',
-      body: { username: pending.username, password: pending.password, label: '' },
+      body: {
+        username: pending.username,
+        password: pending.password,
+        label: '',
+        task_id: task.id,
+      },
     });
     toast('账号已保存到本机', 'success');
     if (!$('#add-saved').hidden) refreshCredentials();
