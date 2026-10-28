@@ -620,7 +620,11 @@ def _wait_for_video_progress(
     finish_progress: float | None = None
     for delay in _VIDEO_PROGRESS_RETRY_DELAYS:
         control.checkpoint()
-        time.sleep(delay)
+        control.wait_for_cooldown(
+            int(delay * 1000),
+            "正在等待服务端记录视频进度",
+            "继续校验视频进度",
+        )
         control.checkpoint()
         finish_progress = _task_finish_progress(
             control, client, course, task_id, resource_id

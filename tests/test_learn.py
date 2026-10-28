@@ -23,6 +23,7 @@ class FakeControl:
         self.statuses = []
         self.progress = []
         self.warnings = []
+        self.cooldowns = []
         self.stop_requested = False
         self.user = FakeUser()
 
@@ -39,7 +40,7 @@ class FakeControl:
         self.statuses.append(status)
 
     def wait_for_cooldown(self, ms, waiting_desc, after_desc):
-        pass
+        self.cooldowns.append((ms, waiting_desc, after_desc))
 
     def suspend(self):
         pass
@@ -564,8 +565,12 @@ def _video_popup_client(finish_progress):
     )
 
 
+def _reject_direct_sleep(seconds):
+    raise AssertionError("video progress wait must be cancellable")
+
+
 def test_video_popup_is_skipped_when_server_progress_stays_zero(monkeypatch):
-    monkeypatch.setattr(learn_module.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(learn_module.time, "sleep", _reject_direct_sleep)
     client = _video_popup_client(0)
     control = FakeControl()
     context = load_course_context(control, client, CourseResource(id=1))
@@ -587,8 +592,7 @@ def test_video_popup_is_skipped_when_server_progress_stays_zero(monkeypatch):
     ]
 
 
-def test_video_popup_is_submitted_when_server_progress_is_complete(monkeypatch):
-    monkeypatch.setattr(learn_module.time, "sleep", lambda seconds: None)
+def test_video_popup_is_submitted_when_server_progress_is_complete():
     client = _video_popup_client(100)
     control = FakeControl()
     context = load_course_context(control, client, CourseResource(id=1))
@@ -604,7 +608,7 @@ def test_video_popup_is_submitted_when_server_progress_is_complete(monkeypatch):
 def test_video_popup_refreshes_progress_after_server_write(monkeypatch):
     progresses = iter([0.0, 100.0])
     events = []
-    monkeypatch.setattr(learn_module.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(learn_module.time, "sleep", _reject_direct_sleep)
 
     def record_progress(*args):
         progress = next(progresses)
@@ -631,6 +635,10 @@ def test_video_popup_refreshes_progress_after_server_write(monkeypatch):
         ("progress", 0.0),
         ("progress", 100.0),
         ("refresh",),
+    ]
+    assert control.cooldowns == [
+        (1000, "正在等待服务端记录视频进度", "继续校验视频进度"),
+        (2000, "正在等待服务端记录视频进度", "继续校验视频进度"),
     ]
 
 
