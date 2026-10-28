@@ -503,6 +503,100 @@ def test_catalog_marks_missing_leaf_status_unknown():
     assert leaf["selectable"] is False
 
 
+def _video_popup_client(finish_progress):
+    units = {
+        "name": "c",
+        "units": [
+            {
+                "id": "u1",
+                "role": "unit",
+                "caption": "Unit 1",
+                "name": "Unit 1",
+                "children": [
+                    {
+                        "id": "t1",
+                        "role": "link",
+                        "name": "Critical thinking skill",
+                        "url": "x",
+                        "ref-out": "y",
+                        "question_num": 1,
+                        "base": "video-popup",
+                        "tab_type": "video",
+                        "linkType": "task",
+                    }
+                ],
+            }
+        ],
+    }
+    answer_json = json.dumps(
+        [
+            {
+                "id": 11,
+                "answer": json.dumps(
+                    {"children": [{"answers": ["A", "B", "C", "D"]}]}
+                ),
+            }
+        ]
+    )
+    return FakeClient(
+        units_json=json.dumps(units),
+        unit_situation={
+            "success": True,
+            "value": {
+                "list": [
+                    {
+                        "nodeId": "u1",
+                        "role": "unit",
+                        "children": [
+                            {
+                                "nodeId": "t1",
+                                "role": "link",
+                                "finishProgress": finish_progress,
+                            }
+                        ],
+                    }
+                ]
+            },
+        },
+        answer_json=answer_json,
+    )
+
+
+def test_video_popup_is_skipped_when_server_progress_stays_zero():
+    client = _video_popup_client(0)
+    control = FakeControl()
+    context = load_course_context(control, client, CourseResource(id=1))
+
+    summary = learn_selected_tasks(
+        control, client, context, ["t1"], progress={"t1": 0.0}
+    )
+
+    assert summary.submitted_tasks == 0
+    assert summary.skipped_tasks == 1
+    assert any("观看进度" in reason for reason in summary.skipped_reasons)
+    assert any("观看进度" in warning for warning in control.warnings)
+
+    body = json.loads(client.submitted_body)
+    answer = json.loads(body["quesDatas"][0]["answer"])
+    assert answer["progress"] == {"0": True}
+    assert answer["children"] == [
+        {"value": ["A", "B", "C", "D"], "isDone": True}
+    ]
+
+
+def test_video_popup_is_submitted_when_server_progress_is_complete():
+    client = _video_popup_client(100)
+    control = FakeControl()
+    context = load_course_context(control, client, CourseResource(id=1))
+
+    summary = learn_selected_tasks(
+        control, client, context, ["t1"], progress={"t1": 0.0}
+    )
+
+    assert summary.submitted_tasks == 1
+    assert summary.skipped_tasks == 0
+
+
 def test_learn_selected_tasks_respects_task_time_window():
     import time
 

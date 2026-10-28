@@ -576,8 +576,50 @@ def _learn_task(
         throttle,
     )
     _refresh_progress(control, client, resource_id)
+
+    if any(t is QuestionType.VIDEO_POPUP for t in question_types):
+        finish_progress = _task_finish_progress(
+            control, client, course, task_id, resource_id
+        )
+        if finish_progress is None or finish_progress < 100.0:
+            progress_text = (
+                "未知"
+                if finish_progress is None
+                else f"{finish_progress:g}%"
+            )
+            reason = (
+                f"任务 {task_id} 提交成功但服务端未记录观看进度"
+                f"（{progress_text}），请完整播放视频后重试"
+            )
+            logger.warning(reason)
+            control.warn(reason)
+            _skip(control, summary, reason)
+            return False
+
     summary.submitted_tasks += 1
     return True
+
+
+def _task_finish_progress(
+    control,
+    client,
+    course: CourseDetail,
+    task_id: str,
+    resource_id: int,
+) -> float | None:
+    unit_id = course.unit_of.get(task_id, "")
+    if not unit_id:
+        return None
+    state = client.get_unit_task_situation(
+        unit_id,
+        resource_id,
+        control.user.app_user_id,
+        control.user.sso_id,
+    )
+    if not state.get("success", True):
+        return None
+    node = UnitSituation.parse(state).get_node_by_node_id(task_id)
+    return node.finish_progress if node is not None else None
 
 
 def _submit_with_retry(
