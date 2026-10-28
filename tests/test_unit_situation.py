@@ -1,3 +1,5 @@
+import json
+
 from unipus_web.core.answer import extract_answers, parse_answers
 from unipus_web.core.course_detail import QuestionType
 from unipus_web.core.unit_situation import UnitSituation
@@ -47,6 +49,30 @@ def test_answer_parsing_and_extraction():
     assert extract_answers(answers[0], QuestionType.SINGLE_CHOICE) == ["A", "B"]
     assert extract_answers(answers[0], QuestionType.SHORT_ANSWER) == ["why"]
     assert extract_answers(answers[0], QuestionType.TEXT_LEARN) == []
+
+
+def test_translation_falls_back_to_analysis_children():
+    raw = json.dumps([
+        {
+            'id': 12,
+            'answer': json.dumps({'children': [{}, {}, {}]}),
+            'analysis': json.dumps(
+                {
+                    'children': [
+                        {'analysis': '<p>patience is a must</p>'},
+                        {'analysis': '<p>comfortable shoes are a must</p>'},
+                        {'analysis': '<p>examples are a must</p>'},
+                    ]
+                }
+            ),
+        }
+    ])
+    answers = parse_answers(raw)
+    assert extract_answers(answers[0], QuestionType.TRANSLATION) == [
+        '<p>patience is a must</p>',
+        '<p>comfortable shoes are a must</p>',
+        '<p>examples are a must</p>',
+    ]
 
 
 def test_answer_parsing_tolerates_bad_input():

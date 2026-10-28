@@ -75,6 +75,8 @@ def parse_answers(answer_json: str | None) -> list[AnswerRecord]:
 
 def extract_answers(answer: AnswerRecord, qtype: QuestionType) -> list[str]:
     if qtype in _OBJECTIVE_TYPES:
+        if qtype is QuestionType.TRANSLATION and not answer.answers:
+            return list(answer.analysis_items)
         return list(answer.answers)
     if qtype is QuestionType.SHORT_ANSWER:
         return list(answer.analysis_items)
