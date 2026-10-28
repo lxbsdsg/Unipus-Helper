@@ -36,6 +36,8 @@ from .unit_situation import UnitSituation
 
 logger = logging.getLogger(__name__)
 
+_VIDEO_PROGRESS_RETRY_DELAYS = (1.0, 2.0, 3.0)
+
 
 @dataclass
 class LearnSummary:
@@ -575,9 +577,79 @@ def _learn_task(
         course_instance_id,
         throttle,
     )
-    _refresh_progress(control, client, resource_id)
+
+    if any(t is QuestionType.VIDEO_POPUP for t in question_types):
+        finish_progress = _wait_for_video_progress(
+            control, client, course, task_id, resource_id
+        )
+        _refresh_progress(control, client, resource_id)
+        if finish_progress is None or finish_progress < 100.0:
+            progress_text = (
+                "未知"
+                if finish_progress is None
+                else f"{finish_progress:g}%"
+            )
+            reason = (
+                f"任务 {task_id} 提交成功但服务端未记录观看进度"
+                f"（{progress_text}），请稍后刷新进度；若仍未完成，"
+                "请完整播放视频后重试"
+            )
+            logger.warning(reason)
+            control.warn(reason)
+            _skip(control, summary, reason)
+            return False
+    else:
+        _refresh_progress(control, client, resource_id)
+
     summary.submitted_tasks += 1
     return True
+
+
+def _wait_for_video_progress(
+    control,
+    client,
+    course: CourseDetail,
+    task_id: str,
+    resource_id: int,
+) -> float | None:
+    """等待服务端异步写入视频弹题进度。
+
+    官方提交接口返回成功后，学习进度并非立即可见；立即回查会稳定读到
+    0%，从而把已经成功的任务误判为跳过。
+    """
+    finish_progress: float | None = None
+    for delay in _VIDEO_PROGRESS_RETRY_DELAYS:
+        control.checkpoint()
+        time.sleep(delay)
+        control.checkpoint()
+        finish_progress = _task_finish_progress(
+            control, client, course, task_id, resource_id
+        )
+        if finish_progress is not None and finish_progress >= 100.0:
+            return finish_progress
+    return finish_progress
+
+
+def _task_finish_progress(
+    control,
+    client,
+    course: CourseDetail,
+    task_id: str,
+    resource_id: int,
+) -> float | None:
+    unit_id = course.unit_of.get(task_id, "")
+    if not unit_id:
+        return None
+    state = client.get_unit_task_situation(
+        unit_id,
+        resource_id,
+        control.user.app_user_id,
+        control.user.sso_id,
+    )
+    if not state.get("success", True):
+        return None
+    node = UnitSituation.parse(state).get_node_by_node_id(task_id)
+    return node.finish_progress if node is not None else None
 
 
 def _submit_with_retry(

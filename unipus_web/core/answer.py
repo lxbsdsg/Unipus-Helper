@@ -52,11 +52,14 @@ def parse_answers(answer_json: str | None) -> list[AnswerRecord]:
         analysis_obj = _decode_inner(data.get("analysis"))
 
         answers: list[str] = []
+        all_answers: list[str] = []
         for child in answer_obj.get("children") or []:
             child_data = lenient_obj(child)
             raw_answers = child_data.get("answers")
             if isinstance(raw_answers, list) and raw_answers:
-                answers.append(as_str(raw_answers[0]))
+                values = [as_str(value) for value in raw_answers]
+                answers.append(values[0])
+                all_answers.extend(values)
 
         analysis_items: list[str] = []
         for child in analysis_obj.get("children") or []:
@@ -66,6 +69,7 @@ def parse_answers(answer_json: str | None) -> list[AnswerRecord]:
             AnswerRecord(
                 id=as_int(data.get("id")),
                 answers=answers,
+                all_answers=all_answers,
                 analysis_items=analysis_items,
                 analysis=as_str(analysis_obj.get("analysis")),
             )
@@ -74,6 +78,8 @@ def parse_answers(answer_json: str | None) -> list[AnswerRecord]:
 
 
 def extract_answers(answer: AnswerRecord, qtype: QuestionType) -> list[str]:
+    if qtype is QuestionType.VIDEO_POPUP:
+        return list(answer.all_answers or answer.answers)
     if qtype in _OBJECTIVE_TYPES:
         if qtype is QuestionType.TRANSLATION and not answer.answers:
             return list(answer.analysis_items)

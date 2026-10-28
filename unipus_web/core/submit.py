@@ -117,6 +117,71 @@ def _single_body(
     return json.dumps(body, ensure_ascii=False)
 
 
+def _video_popup_body(
+    instance_ids: list[int],
+    answers: list[list[str]],
+    group_id: str,
+    course_id: str,
+    open_id: str,
+    sanitize: bool,
+) -> str:
+    """构造视频弹题提交体。
+
+    官方页面会把弹题的所有选项合并到同一个 child，并在 progress 中写入
+    已观看标记；缺少该标记时服务端只保存答案，不会推进视频完成度。
+    """
+    ques_datas: list[dict] = []
+    is_completed: list[bool] = []
+    judges: list[dict] = []
+    for instance_id, raw_answers in zip(instance_ids, answers):
+        values = [_prepare(value, sanitize) for value in raw_answers]
+        answer_obj = {
+            "value": [],
+            "children": [{"value": values, "isDone": True}],
+            "progress": {"0": True},
+            "record": {"url": ""},
+        }
+        ques_datas.append(
+            {
+                "instanceId": str(instance_id),
+                "answer": json.dumps(answer_obj, ensure_ascii=False),
+                "context": '{"state":"submitted"}',
+                "contextVersion": 1,
+                "answerVersion": 1,
+            }
+        )
+        is_completed.append(True)
+        judges.append(
+            {
+                "value": ",".join(values),
+                "question_type": QuestionType.VIDEO_POPUP.value,
+                "reply_type": "multichoice",
+                "versions": {
+                    "course": 0,
+                    "group": 1,
+                    "template": 1,
+                    "answer": 0,
+                    "content": 0,
+                },
+                "payloads": [],
+            }
+        )
+
+    body = {
+        "quesDatas": ques_datas,
+        "groupId": group_id,
+        "isCompleted": is_completed,
+        "thirdPartyJudges": json.dumps(judges, ensure_ascii=False),
+        "submitType": 1,
+        "hideLoading": False,
+        "associationGroupId": "",
+        "courseId": course_id,
+        "openId": open_id,
+        "version": "default",
+    }
+    return json.dumps(body, ensure_ascii=False)
+
+
 def _repeat(value: Any, n: int) -> list:
     return [value for _ in range(n)]
 
@@ -288,6 +353,16 @@ def create_submit_body(
         raise ValueError(
             "instance_ids, answers, question_types 长度必须一致且非空；"
             f"实际为 {len(instance_ids)}/{len(answers)}/{len(question_types)}"
+        )
+
+    if all(qtype is QuestionType.VIDEO_POPUP for qtype in question_types):
+        return _video_popup_body(
+            instance_ids,
+            answers,
+            group_id,
+            course_id,
+            open_id,
+            sanitize,
         )
 
     if len(instance_ids) == 1:

@@ -51,6 +51,28 @@ def test_answer_parsing_and_extraction():
     assert extract_answers(answers[0], QuestionType.TEXT_LEARN) == []
 
 
+def test_video_popup_keeps_all_selected_answers():
+    raw = json.dumps(
+        [
+            {
+                "id": 13,
+                "answer": json.dumps(
+                    {"children": [{"answers": ["A", "B", "C", "D"]}]}
+                ),
+            }
+        ]
+    )
+
+    answers = parse_answers(raw)
+    assert answers[0].answers == ["A"]
+    assert extract_answers(answers[0], QuestionType.VIDEO_POPUP) == [
+        "A",
+        "B",
+        "C",
+        "D",
+    ]
+
+
 def test_translation_falls_back_to_analysis_children():
     raw = json.dumps([
         {

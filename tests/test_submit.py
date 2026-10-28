@@ -46,6 +46,47 @@ def test_preset_mode_body_has_no_quesdatas():
     assert body["hideLoading"] is True
 
 
+def test_video_popup_body_records_watched_progress_and_merged_answers():
+    body = json.loads(
+        create_submit_body(
+            [42],
+            [["A", "B", "C", "D"]],
+            "g",
+            "c",
+            "o",
+            [QuestionType.VIDEO_POPUP],
+        )
+    )
+
+    question = body["quesDatas"][0]
+    answer = json.loads(question["answer"])
+    assert question["contextVersion"] == 1
+    assert question["answerVersion"] == 1
+    assert answer["children"] == [
+        {"value": ["A", "B", "C", "D"], "isDone": True}
+    ]
+    assert answer["progress"] == {"0": True}
+    assert body["submitType"] == 1
+    assert body["isCompleted"] == [True]
+
+    judges = json.loads(body["thirdPartyJudges"])
+    assert judges == [
+        {
+            "value": "A,B,C,D",
+            "question_type": "video-popup",
+            "reply_type": "multichoice",
+            "versions": {
+                "course": 0,
+                "group": 1,
+                "template": 1,
+                "answer": 0,
+                "content": 0,
+            },
+            "payloads": [],
+        }
+    ]
+
+
 def test_multi_question_body_has_course_answer_map():
     body = json.loads(
         create_submit_body(
