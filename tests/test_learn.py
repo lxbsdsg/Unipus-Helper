@@ -1,5 +1,7 @@
 import json
 
+import unipus_web.core.learn as learn_module
+
 from unipus_web.core.learn import (
     build_catalog,
     learn_course,
@@ -562,7 +564,8 @@ def _video_popup_client(finish_progress):
     )
 
 
-def test_video_popup_is_skipped_when_server_progress_stays_zero():
+def test_video_popup_is_skipped_when_server_progress_stays_zero(monkeypatch):
+    monkeypatch.setattr(learn_module.time, "sleep", lambda seconds: None)
     client = _video_popup_client(0)
     control = FakeControl()
     context = load_course_context(control, client, CourseResource(id=1))
@@ -584,7 +587,8 @@ def test_video_popup_is_skipped_when_server_progress_stays_zero():
     ]
 
 
-def test_video_popup_is_submitted_when_server_progress_is_complete():
+def test_video_popup_is_submitted_when_server_progress_is_complete(monkeypatch):
+    monkeypatch.setattr(learn_module.time, "sleep", lambda seconds: None)
     client = _video_popup_client(100)
     control = FakeControl()
     context = load_course_context(control, client, CourseResource(id=1))
@@ -595,6 +599,39 @@ def test_video_popup_is_submitted_when_server_progress_is_complete():
 
     assert summary.submitted_tasks == 1
     assert summary.skipped_tasks == 0
+
+
+def test_video_popup_refreshes_progress_after_server_write(monkeypatch):
+    progresses = iter([0.0, 100.0])
+    events = []
+    monkeypatch.setattr(learn_module.time, "sleep", lambda seconds: None)
+
+    def record_progress(*args):
+        progress = next(progresses)
+        events.append(("progress", progress))
+        return progress
+
+    monkeypatch.setattr(learn_module, "_task_finish_progress", record_progress)
+    monkeypatch.setattr(
+        learn_module,
+        "_refresh_progress",
+        lambda *args: events.append(("refresh",)),
+    )
+    client = _video_popup_client(0)
+    control = FakeControl()
+    context = load_course_context(control, client, CourseResource(id=1))
+
+    summary = learn_selected_tasks(
+        control, client, context, ["t1"], progress={"t1": 0.0}
+    )
+
+    assert summary.submitted_tasks == 1
+    assert summary.skipped_tasks == 0
+    assert events == [
+        ("progress", 0.0),
+        ("progress", 100.0),
+        ("refresh",),
+    ]
 
 
 def test_learn_selected_tasks_respects_task_time_window():
