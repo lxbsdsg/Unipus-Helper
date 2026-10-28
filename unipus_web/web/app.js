@@ -51,6 +51,15 @@ const state = {
   catalog: null,
   catalogLeavesById: new Map(),
   catalogSelection: new Set(),
+  catalogNodeByKey: new Map(),
+  catalogParentByKey: new Map(),
+  catalogCurrentKey: null,
+  catalogQuery: '',
+  catalogFilter: 'all',
+  catalogCollapsed: false,
+  catalogGroupsOpen: new Map(),
+  courseQuery: '',
+  taskQuery: '',
   activeTaskId: null,
   ws: null,
   reconnectDelay: 1000,
@@ -140,7 +149,17 @@ function confirmAction(title, message, okLabel) {
 /* ------------------------------------------------------------ 任务渲染 */
 
 function renderTasks() {
-  const tasks = [...state.tasks.values()].sort((a, b) => a.id.localeCompare(b.id));
+  const allTasks = [...state.tasks.values()].sort((a, b) => a.id.localeCompare(b.id));
+  const query = state.taskQuery.trim().toLowerCase();
+  const tasks = query
+    ? allTasks.filter((task) =>
+        [task.name, task.username, task.user_name, task.school_name, task.description, task.id]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase()
+          .includes(query)
+      )
+    : allTasks;
   const list = $('#task-list');
   list.textContent = '';
 
@@ -148,14 +167,68 @@ function renderTasks() {
     list.append(renderTask(task));
   }
 
-  const hasTasks = tasks.length > 0;
+  const hasTasks = allTasks.length > 0;
   $('#empty-state').hidden = hasTasks;
-  $('.task-foot').hidden = !hasTasks;
+  $('#task-search-empty').hidden = !hasTasks || tasks.length > 0;
 
-  const running = tasks.filter((task) => task.status === 'RUNNING').length;
+  const running = allTasks.filter((task) => task.status === 'RUNNING').length;
+  const attention = allTasks.filter((task) =>
+    ['NEED_OPERATION', 'ERROR'].includes(task.status)
+  ).length;
+  const completed = allTasks.filter((task) => task.status === 'COMPLETED').length;
+  const taskValue = (id, value) => {
+    const node = $(id);
+    if (node) node.textContent = String(value);
+  };
+  taskValue('#summary-total', allTasks.length);
+  taskValue('#summary-running', running);
+  taskValue('#summary-attention', attention);
+  taskValue('#summary-completed', completed);
+  taskValue('#context-task-count', allTasks.length);
   $('#task-summary').textContent = hasTasks
-    ? `${tasks.length} 个任务 · ${running} 个运行中`
+    ? `${allTasks.length} 个任务 · ${running} 个运行中`
     : '0 个任务';
+  renderContext(allTasks);
+}
+
+function renderContext(tasks) {
+  let task = tasks.find((item) => item.status === 'RUNNING');
+  if (!task) task = tasks.find((item) => item.status === 'NEED_OPERATION');
+  if (!task) task = tasks.find((item) => item.status === 'ERROR');
+  if (!task) task = tasks.find((item) => item.status === 'PAUSED');
+  if (!task) task = tasks[0];
+
+  const label = task ? task.name || task.username || task.id : '等待任务';
+  const note = task
+    ? task.description || [task.user_name, task.school_name].filter(Boolean).join(' · ') || task.id
+    : '添加任务后，这里会显示当前学习进度。';
+  const status = task ? task.status : 'READY';
+  const tones = {
+    RUNNING: 'running',
+    NEED_OPERATION: 'attention',
+    ERROR: 'error',
+    COMPLETED: 'done',
+  };
+  const percent = task ? Math.max(0, Math.min(100, task.progress_percent || 0)) : 0;
+  $('#context-state-label').textContent = label;
+  $('#context-state-note').textContent = note;
+  $('#context-state-dot').dataset.tone = tones[status] || 'idle';
+  $('#context-progress').textContent = `${percent}%`;
+  $('#context-count').textContent = task ? `${task.completed || 0} / ${task.total || 0}` : '0 / 0';
+  $('#context-progress-fill').style.width = `${percent}%`;
+  $('.context-meter').setAttribute('aria-valuenow', String(percent));
+  $('#context-account').textContent = task ? task.username : '未添加';
+  $('#context-log-count').textContent = `${state.logs.length} 条`;
+  renderSidebarCounts();
+}
+
+function renderSidebarCounts() {
+  const errors = state.logs.filter((record) =>
+    ['ERROR', 'CRITICAL'].includes(record.level)
+  ).length;
+  $('#log-nav-count').textContent = String(errors);
+  $('#net-nav-count').textContent = String(state.network.length);
+  $('#credential-nav-count').textContent = String(state.credentials.length);
 }
 
 function renderTask(task) {
@@ -385,6 +458,8 @@ async function manageAction(task, action) {
 async function openCourse(taskId) {
   state.courseTaskId = taskId;
   state.courseSelection = { course: null, resource: null, courses: [] };
+  state.courseQuery = '';
+  $('#course-search').value = '';
   $('#course-error').hidden = true;
 
   let courses;
@@ -406,13 +481,22 @@ function renderCourseOptions() {
   const resourceBox = $('#resource-options');
   courseBox.textContent = '';
   resourceBox.textContent = '';
+  const query = state.courseQuery.trim().toLowerCase();
+  const courses = selection.courses.filter((course) =>
+    !query || (course.name || '').toLowerCase().includes(query)
+  );
+  $('#course-option-count').textContent = `${courses.length} 门`;
 
   if (!selection.courses.length) {
     courseBox.append(el('div', 'saved-empty', '没有可选课程'));
+    $('#resource-option-count').textContent = '0 个';
     return;
   }
+  if (!courses.length) {
+    courseBox.append(el('div', 'saved-empty', '没有匹配的课程'));
+  }
 
-  for (const course of selection.courses) {
+  for (const course of courses) {
     const node = el('button', 'option', course.name || `课程 ${course.id}`);
     node.type = 'button';
     node.setAttribute('role', 'option');
@@ -435,10 +519,22 @@ function renderResourceOptions() {
   const selection = state.courseSelection;
   const box = $('#resource-options');
   box.textContent = '';
-  const resources = selection.course ? selection.course.resources || [] : [];
+  const query = state.courseQuery.trim().toLowerCase();
+  const resources = selection.course
+    ? (selection.course.resources || []).filter((resource) =>
+        !query || (resource.name || '').toLowerCase().includes(query)
+      )
+    : [];
+  $('#resource-option-count').textContent = `${resources.length} 个`;
 
   if (!resources.length) {
-    box.append(el('div', 'saved-empty', selection.course ? '该课程没有教程' : '先选择左侧课程'));
+    let message = '先选择左侧课程';
+    if (selection.course) {
+      message = (selection.course.resources || []).length
+        ? '没有匹配的教程'
+        : '该课程没有教程';
+    }
+    box.append(el('div', 'saved-empty', message));
     return;
   }
 
@@ -477,10 +573,22 @@ async function openCatalog(taskId) {
   state.catalog = null;
   state.catalogLeavesById = new Map();
   state.catalogSelection = new Set();
+  state.catalogNodeByKey = new Map();
+  state.catalogParentByKey = new Map();
+  state.catalogCurrentKey = null;
+  state.catalogQuery = '';
+  state.catalogFilter = 'all';
+  state.catalogCollapsed = false;
+  state.catalogGroupsOpen = new Map();
+  $('#catalog-collapse').setAttribute('aria-label', '收起全部目录');
+  $('#catalog-collapse').title = '收起全部目录';
   $('#catalog-error').hidden = true;
   $('#catalog-tree').textContent = '';
-  $('#catalog-summary').textContent = '正在加载目录…';
+  $('#catalog-summary').textContent = '正在加载…';
+  $('#catalog-search').value = '';
+  $('#catalog-filter').value = 'all';
   $('#catalog-start').disabled = true;
+  renderCatalogContext();
 
   let tree;
   try {
@@ -508,73 +616,166 @@ function catalogNodeKey(node) {
   return node._key;
 }
 
-function indexCatalog(node) {
+function indexCatalog(node, parentKey = null) {
   const leaves = [];
   const children = node.children || [];
+  const key = catalogNodeKey(node);
+  state.catalogNodeByKey.set(key, node);
+  state.catalogParentByKey.set(key, parentKey);
   if (children.length) {
-    for (const child of children) leaves.push(...indexCatalog(child));
+    for (const child of children) leaves.push(...indexCatalog(child, key));
   } else if (node.selectable) {
     leaves.push(node.id);
   }
-  const key = catalogNodeKey(node);
   state.catalogLeavesById.set(key, leaves);
   return leaves;
 }
 
 function renderCatalogTree(tree) {
-  const box = $('#catalog-tree');
-  box.textContent = '';
   state.catalogLeavesById = new Map();
   state.catalogSelection = new Set();
+  state.catalogNodeByKey = new Map();
+  state.catalogParentByKey = new Map();
+  state.catalogCurrentKey = null;
 
   const units = (tree && tree.units) || [];
+  $('#catalog-unit-count').textContent = `${units.length} 个单元`;
+  renderCatalogContext();
   if (!units.length) {
+    const box = $('#catalog-tree');
+    box.textContent = '';
     box.append(el('div', 'saved-empty', '这个教程没有可用的题目目录'));
+    renderCatalogItems();
     syncCatalogChecks();
     return;
   }
 
   for (const unit of units) indexCatalog(unit);
-  for (const unit of units) box.append(renderCatalogNode(unit, 0));
+  state.catalogCurrentKey = catalogNodeKey(units[0]);
+  renderCatalogNavigation(true);
   syncCatalogChecks();
+}
+
+function catalogIsLeaf(node) {
+  return !(node.children || []).length;
+}
+
+function catalogStatus(node) {
+  const finish = Number(node.finish_progress || 0);
+  if (finish >= 100) return 'done';
+  if (node.selectable) return 'open';
+  if (!node.status_known) return 'unknown';
+  return 'blocked';
+}
+
+function catalogMatches(node) {
+  if (catalogIsLeaf(node)) {
+    const filter = state.catalogFilter;
+    const filterMatch =
+      filter === 'all' ||
+      catalogStatus(node) === filter ||
+      (filter === 'open' && catalogStatus(node) === 'unknown');
+    if (!filterMatch) return false;
+  }
+  const query = state.catalogQuery.trim().toLowerCase();
+  return !query || catalogLabel(node).toLowerCase().includes(query);
+}
+
+function catalogChecked(key) {
+  const leaves = state.catalogLeavesById.get(key) || [];
+  const selected = leaves.filter((id) => state.catalogSelection.has(id)).length;
+  return {
+    leaves,
+    selected,
+    checked: leaves.length > 0 && selected === leaves.length,
+    indeterminate: selected > 0 && selected < leaves.length,
+  };
+}
+
+function catalogNodeCheckbox(node, onChange) {
+  const checkbox = document.createElement('input');
+  checkbox.type = 'checkbox';
+  checkbox.className = 'catalog-check';
+  checkbox.dataset.nodeId = catalogNodeKey(node);
+  checkbox.setAttribute('aria-label', `${catalogLabel(node)}，选择全部可练习题目`);
+  checkbox.disabled = !(state.catalogLeavesById.get(checkbox.dataset.nodeId) || []).length;
+  checkbox.addEventListener('click', (event) => event.stopPropagation());
+  checkbox.addEventListener('change', () => {
+    onChange(checkbox.checked);
+    syncCatalogChecks();
+  });
+  return checkbox;
+}
+
+function setCatalogGroupSelection(node, checked) {
+  const leafIds = new Set(state.catalogLeavesById.get(catalogNodeKey(node)) || []);
+  const visibleLeaves = catalogDescendantLeaves(node)
+    .filter((leaf) => catalogMatches(leaf))
+    .map((leaf) => leaf.id)
+    .filter((leafId) => leafIds.has(leafId));
+  for (const leafId of visibleLeaves) {
+    if (checked) state.catalogSelection.add(leafId);
+    else state.catalogSelection.delete(leafId);
+  }
+}
+
+function renderCatalogNavigation(preserveSelection = false) {
+  const box = $('#catalog-tree');
+  box.textContent = '';
+  const units = (state.catalog && state.catalog.units) || [];
+  const visibleUnits = units.filter(catalogMatches);
+  $('#catalog-nav-empty').hidden = visibleUnits.length > 0;
+  $('#catalog-unit-count').textContent = `${visibleUnits.length} 个单元`;
+  if (!visibleUnits.length) {
+    renderCatalogItems();
+    return;
+  }
+  for (const unit of visibleUnits) box.append(renderCatalogNode(unit, 0));
+  renderCatalogItems();
+  syncCatalogChecks(preserveSelection);
 }
 
 function renderCatalogNode(node, depth) {
   const children = node.children || [];
   const row = el('div', 'catalog-row');
-  row.style.setProperty('--depth', String(depth));
-
-  const checkbox = document.createElement('input');
-  checkbox.type = 'checkbox';
-  checkbox.className = 'catalog-check';
   const nodeKey = catalogNodeKey(node);
-  checkbox.dataset.nodeId = nodeKey;
-  checkbox.setAttribute('aria-label', catalogLabel(node));
 
   if (children.length) {
     row.classList.add('catalog-group-row');
     const leaves = state.catalogLeavesById.get(nodeKey) || [];
-    checkbox.disabled = leaves.length === 0;
     const details = document.createElement('details');
     details.className = 'catalog-group';
-    details.open = depth < 2;
+    details.dataset.nodeKey = nodeKey;
+    details.open = state.catalogQuery.trim() || state.catalogGroupsOpen.get(nodeKey) ||
+      state.catalogFilter !== 'all' ||
+      (!state.catalogCollapsed && (state.catalogCurrentKey === nodeKey ||
+        isCatalogAncestor(nodeKey, state.catalogCurrentKey) || depth === 0));
 
     const summary = document.createElement('summary');
+    summary.style.setProperty('--depth', String(depth));
+    summary.classList.toggle('is-current', state.catalogCurrentKey === nodeKey);
+    const checkbox = catalogNodeCheckbox(node, (checked) =>
+      setCatalogGroupSelection(node, checked)
+    );
     summary.append(checkbox, el('span', 'catalog-name', catalogLabel(node)));
     summary.append(el('span', 'catalog-count', `${leaves.length} 题`));
-
-    checkbox.addEventListener('click', (event) => event.stopPropagation());
-    checkbox.addEventListener('change', () => {
-      for (const leafId of leaves) {
-        if (checkbox.checked) state.catalogSelection.add(leafId);
-        else state.catalogSelection.delete(leafId);
+    summary.addEventListener('click', (event) => {
+      if (event.target.closest('.catalog-check')) return;
+      event.preventDefault();
+      details.open = true;
+      state.catalogGroupsOpen.set(nodeKey, true);
+      for (let ancestor = state.catalogParentByKey.get(nodeKey); ancestor;
+        ancestor = state.catalogParentByKey.get(ancestor)) {
+        state.catalogGroupsOpen.set(ancestor, true);
       }
-      syncCatalogChecks();
+      selectCatalogNode(nodeKey, false);
     });
 
     details.append(summary);
     const childBox = el('div', 'catalog-children');
-    for (const child of children) childBox.append(renderCatalogNode(child, depth + 1));
+    for (const child of children) {
+      if (catalogMatches(child)) childBox.append(renderCatalogNode(child, depth + 1));
+    }
     details.append(childBox);
     row.append(details);
     return row;
@@ -582,56 +783,227 @@ function renderCatalogNode(node, depth) {
 
   const selectable = Boolean(node.selectable);
   const finish = Number(node.finish_progress || 0);
-  checkbox.disabled = !selectable;
   row.classList.add('catalog-leaf-row');
   row.classList.toggle('is-complete', finish >= 100);
   row.classList.toggle('is-unsupported', !selectable && finish < 100);
-
-  const types = (node.bases || []).map((raw) => TYPE_LABEL[raw] || raw).join('、');
-  const parts = [];
-  if (types) parts.push(types);
-  if (node.question_num > 1) parts.push(`${node.question_num} 小题`);
-  if (!node.status_known) parts.push('状态未知');
-  else parts.push(finish >= 100 ? '已完成' : selectable ? '未完成' : '不可刷');
-
-  checkbox.addEventListener('change', () => {
-    if (checkbox.checked) state.catalogSelection.add(node.id);
+  row.style.setProperty('--depth', String(depth));
+  const checkbox = catalogNodeCheckbox(node, (checked) => {
+    if (checked) state.catalogSelection.add(node.id);
     else state.catalogSelection.delete(node.id);
-    syncCatalogChecks();
   });
 
   row.append(checkbox, el('span', 'catalog-name', catalogLabel(node)));
-  row.append(el('span', 'catalog-meta', parts.join(' · ')));
+  row.append(el('span', 'catalog-meta', node.status_known && finish >= 100 ? '已完成' : ''));
   return row;
 }
 
-function syncCatalogChecks() {
+function isCatalogAncestor(ancestorKey, nodeKey) {
+  let current = nodeKey;
+  while (current) {
+    if (current === ancestorKey) return true;
+    current = state.catalogParentByKey.get(current);
+  }
+  return false;
+}
+
+function selectCatalogNode(key, shouldScroll = true) {
+  const node = state.catalogNodeByKey.get(key);
+  if (!node) return;
+  state.catalogCurrentKey = key;
+  renderCatalogNavigation();
+  renderCatalogItems();
+  if (shouldScroll) {
+    const summary = [...$$('.catalog-group > summary', $('#catalog-tree'))]
+      .find((item) => item.parentElement.dataset.nodeKey === key);
+    if (summary) summary.scrollIntoView({ block: 'nearest' });
+  }
+}
+
+function renderCatalogContext() {
+  const task = state.tasks.get(state.catalogTaskId);
+  const name = task ? task.name || task.course_name || task.username || task.id : '当前任务';
+  $('#catalog-context').textContent = name;
+}
+
+function catalogPathKeys(key) {
+  const keys = [];
+  let current = key;
+  while (current) {
+    keys.unshift(current);
+    current = state.catalogParentByKey.get(current);
+  }
+  return keys;
+}
+
+function catalogDescendantLeaves(node, leaves = []) {
+  const children = node.children || [];
+  if (!children.length) {
+    leaves.push(node);
+    return leaves;
+  }
+  for (const child of children) catalogDescendantLeaves(child, leaves);
+  return leaves;
+}
+
+function renderCatalogPath() {
+  const box = $('#catalog-path');
+  box.textContent = '';
+  const keys = catalogPathKeys(state.catalogCurrentKey);
+  keys.forEach((key, index) => {
+    if (index) box.append(el('span', 'catalog-path-separator', '/'));
+    const node = state.catalogNodeByKey.get(key);
+    if (!node) return;
+    const crumb = button(catalogLabel(node), null, () => selectCatalogNode(key, false));
+    crumb.setAttribute('aria-current', index === keys.length - 1 ? 'location' : 'false');
+    box.append(crumb);
+  });
+}
+
+function catalogLeafParts(node) {
+  const parts = [];
+  const types = (node.bases || []).map((raw) => TYPE_LABEL[raw] || raw).join('、');
+  if (types) parts.push(types);
+  if (node.question_num > 1) parts.push(`${node.question_num} 小题`);
+  return parts;
+}
+
+function renderCatalogItems() {
+  const box = $('#catalog-items');
+  box.textContent = '';
+  const current = state.catalogNodeByKey.get(state.catalogCurrentKey);
+  renderCatalogPath();
+  const leaves = current ? catalogDescendantLeaves(current) : [];
+  const visible = leaves.filter(catalogMatches);
+  $('#catalog-item-count').textContent = `${visible.length} 道题目`;
+  $('#catalog-items-empty').hidden = visible.length > 0;
+
+  for (const child of visible) {
+    const row = el('div', 'catalog-leaf-row');
+    row.classList.toggle('is-complete', catalogStatus(child) === 'done');
+    row.classList.toggle('is-unsupported', !child.selectable && catalogStatus(child) !== 'done');
+    const checkbox = catalogNodeCheckbox(child, (checked) => {
+      if (checked) state.catalogSelection.add(child.id);
+      else state.catalogSelection.delete(child.id);
+    });
+    const details = el('div', 'catalog-item-details');
+    details.append(el('span', 'catalog-name', catalogLabel(child)));
+    const path = catalogPathKeys(catalogNodeKey(child)).slice(0, -1).map((key) => {
+      const ancestor = state.catalogNodeByKey.get(key);
+      return ancestor ? catalogLabel(ancestor) : '';
+    }).filter(Boolean).join(' / ');
+    const facts = catalogLeafParts(child);
+    facts.unshift(path);
+    details.append(el('span', 'catalog-item-types', facts.filter(Boolean).join(' · ')));
+
+    const meta = el('div', 'catalog-meta');
+    const status = el('span', 'catalog-status');
+    const statusKey = catalogStatus(child);
+    status.dataset.status = statusKey;
+    status.textContent = {
+      open: '可练习',
+      done: '已完成',
+      blocked: '不可练习',
+      unknown: '状态未知',
+    }[statusKey];
+    meta.append(status);
+    if (!child.selectable) {
+      const reason = child.select_reason || child.reason || child.skip_reason;
+      if (reason) meta.append(el('span', 'catalog-block-reason', String(reason)));
+    }
+    row.append(checkbox, details, meta);
+    box.append(row);
+  }
+  syncCatalogChecks();
+}
+
+function syncCatalogChecks(preserveSelection = true) {
   $$('.catalog-check', $('#catalog-tree')).forEach((checkbox) => {
-    const leaves = state.catalogLeavesById.get(checkbox.dataset.nodeId) || [];
+    const key = checkbox.dataset.nodeId;
+    const node = state.catalogNodeByKey.get(key);
+    const visibleLeaves = node ? catalogDescendantLeaves(node).filter(catalogMatches) : [];
+    const visibleResult = {
+      leaves: visibleLeaves,
+      selected: visibleLeaves.filter((leaf) => state.catalogSelection.has(leaf.id)).length,
+    };
+    visibleResult.checked =
+      visibleResult.leaves.length > 0 && visibleResult.selected === visibleResult.leaves.length;
+    visibleResult.indeterminate = visibleResult.selected > 0 &&
+      visibleResult.selected < visibleResult.leaves.length;
+    const result = visibleResult;
+    const leaves = result.leaves;
     if (!leaves.length) {
       checkbox.checked = false;
       checkbox.indeterminate = false;
       checkbox.disabled = true;
       return;
     }
-    const selected = leaves.filter((leafId) => state.catalogSelection.has(leafId)).length;
-    checkbox.checked = selected === leaves.length;
-    checkbox.indeterminate = selected > 0 && selected < leaves.length;
+    checkbox.checked = result.checked;
+    checkbox.indeterminate = result.indeterminate;
   });
 
+  $$('.catalog-check', $('#catalog-items')).forEach((checkbox) => {
+    const result = catalogChecked(checkbox.dataset.nodeId);
+    checkbox.checked = result.checked;
+    checkbox.indeterminate = result.indeterminate;
+    checkbox.disabled = result.leaves.length === 0;
+  });
+
+  const current = state.catalogNodeByKey.get(state.catalogCurrentKey);
+  if (current) {
+    const result = catalogChecked(state.catalogCurrentKey);
+    const selectCurrent = $('#catalog-select-current');
+    selectCurrent.checked = result.checked;
+    selectCurrent.indeterminate = result.indeterminate;
+    const selectableLeaves = catalogDescendantLeaves(current).filter((leaf) => leaf.selectable).length;
+    const filteredLeaves = catalogDescendantLeaves(current).filter(catalogMatches);
+    selectCurrent.disabled = selectableLeaves === 0;
+    $('#catalog-current-total').textContent =
+      `${filteredLeaves.length} 道符合筛选 · 共 ${selectableLeaves} 道可练习`;
+  }
+
   const count = state.catalogSelection.size;
-  $('#catalog-summary').textContent = `已选 ${count} 题`;
+  $('#catalog-summary').textContent = `已选 ${count} 道题`;
   $('#catalog-start').disabled = count === 0;
 }
 
 function selectAllCatalog() {
-  state.catalogSelection = new Set();
-  for (const unit of (state.catalog && state.catalog.units) || []) {
-    for (const leafId of state.catalogLeavesById.get(catalogNodeKey(unit)) || []) {
-      state.catalogSelection.add(leafId);
+  for (const node of state.catalogNodeByKey.values()) {
+    if (catalogIsLeaf(node) && node.selectable && catalogMatches(node)) {
+      state.catalogSelection.add(node.id);
     }
   }
   syncCatalogChecks();
+}
+
+function toggleCatalogCurrent(checked) {
+  const current = state.catalogNodeByKey.get(state.catalogCurrentKey);
+  if (current) {
+    // 只影响当前过滤视图内可见的题目，保留其它筛选条件下已勾选的题目
+    for (const leaf of catalogDescendantLeaves(current).filter(catalogMatches)) {
+      if (!leaf.selectable) continue;
+      if (checked) state.catalogSelection.add(leaf.id);
+      else state.catalogSelection.delete(leaf.id);
+    }
+  }
+  syncCatalogChecks();
+}
+
+function collapseCatalog() {
+  state.catalogCollapsed = !state.catalogCollapsed;
+  const expand = !state.catalogCollapsed;
+  $$('.catalog-group', $('#catalog-tree')).forEach((details) => {
+    if (expand) details.open = true;
+  });
+  if (state.catalogCollapsed) {
+    $$('#catalog-tree > .catalog-row > .catalog-group').forEach((details) => {
+      details.open = true;
+    });
+  }
+  $('#catalog-collapse').setAttribute(
+    'aria-label',
+    state.catalogCollapsed ? '展开全部目录' : '收起全部目录'
+  );
+  $('#catalog-collapse').title = state.catalogCollapsed ? '展开全部目录' : '收起全部目录';
 }
 
 /* ------------------------------------------------------------ 添加任务 */
@@ -663,6 +1035,7 @@ function renderCredentials() {
   const box = $('#saved-list');
   box.textContent = '';
   state.selectedCredential = null;
+  renderSidebarCounts();
 
   if (!state.credentials.length) {
     box.append(el('div', 'saved-empty', '本机还没有保存的账号'));
@@ -900,11 +1273,14 @@ function renderLogs() {
   const filtered = state.logs.filter(logMatches).slice(-1500);
   for (const record of filtered) box.append(logRow(record));
   if ($('#log-autoscroll').checked) box.scrollTop = box.scrollHeight;
+  renderSidebarCounts();
 }
 
 function appendLog(record) {
   state.logs.push(record);
   if (state.logs.length > 5000) state.logs.splice(0, state.logs.length - 5000);
+  $('#context-log-count').textContent = `${state.logs.length} 条`;
+  renderSidebarCounts();
   if ($('#debug-drawer').classList.contains('is-open') && !$('#panel-logs').hidden && logMatches(record)) {
     const box = $('#log-list');
     box.append(logRow(record));
@@ -988,6 +1364,7 @@ function updateNetworkCount() {
   const count = state.network.filter(netMatches).length;
   const node = $('#net-count');
   if (node) node.textContent = `${count} 条`;
+  renderSidebarCounts();
 }
 
 function appendNetwork(record) {
@@ -1008,6 +1385,12 @@ function appendNetwork(record) {
 /* ------------------------------------------------------------ 抽屉 */
 
 function openDrawer(tab) {
+  $$('[data-nav]').forEach((node) => {
+    const active = node.dataset.nav === tab;
+    node.classList.toggle('is-active', active);
+    if (active) node.setAttribute('aria-current', 'page');
+    else node.removeAttribute('aria-current');
+  });
   $('#debug-drawer').classList.add('is-open');
   $('#debug-drawer').setAttribute('aria-hidden', 'false');
   $('#drawer-backdrop').hidden = false;
@@ -1019,6 +1402,18 @@ function closeDrawer() {
   $('#debug-drawer').classList.remove('is-open');
   $('#debug-drawer').setAttribute('aria-hidden', 'true');
   $('#drawer-backdrop').hidden = true;
+  const current = $('[data-nav][aria-current="page"]');
+  if (current && current.dataset.nav !== 'tasks') {
+    $$('[data-nav]').forEach((node) => {
+      const active = node.dataset.nav === 'tasks';
+      node.classList.toggle('is-active', active);
+      if (active) node.setAttribute('aria-current', 'page');
+      else node.removeAttribute('aria-current');
+    });
+  }
+  $('#page-label').textContent = '任务总览';
+  $('#workspace-title').textContent = '任务总览';
+  $('#workspace-description').textContent = '统一管理课程任务与学习进度';
 }
 
 function selectTab(tab) {
@@ -1031,6 +1426,27 @@ function selectTab(tab) {
   $('#panel-network').hidden = tab !== 'network';
   if (tab === 'logs') renderLogs();
   if (tab === 'network') renderNetwork();
+}
+
+function openNavigation(tab) {
+  $$('[data-nav]').forEach((node) => {
+    const active = node.dataset.nav === tab;
+    node.classList.toggle('is-active', active);
+    if (active) node.setAttribute('aria-current', 'page');
+    else node.removeAttribute('aria-current');
+  });
+  if (tab === 'logs' || tab === 'network') {
+    openDrawer(tab);
+    return;
+  }
+  if (tab === 'accounts') {
+    openAddDialog();
+    setAddMode('saved');
+    return;
+  }
+  $('#page-label').textContent = '任务总览';
+  $('#workspace-title').textContent = '任务总览';
+  $('#workspace-description').textContent = '统一管理课程任务与学习进度';
 }
 
 /* ------------------------------------------------------------ 主题 */
@@ -1080,12 +1496,35 @@ function bindEvents() {
   $('#add-task').addEventListener('click', openAddDialog);
   $('#add-task-empty').addEventListener('click', openAddDialog);
   $('#add-form').addEventListener('submit', submitAddForm);
+  $('#task-search').addEventListener('input', (event) => {
+    state.taskQuery = event.target.value;
+    renderTasks();
+  });
+  $$('[data-nav]').forEach((node) => {
+    node.addEventListener('click', () => openNavigation(node.dataset.nav));
+  });
 
   $('#catalog-form').addEventListener('submit', submitCatalogForm);
   $('#catalog-select-all').addEventListener('click', selectAllCatalog);
   $('#catalog-clear').addEventListener('click', () => {
     state.catalogSelection = new Set();
     syncCatalogChecks();
+  });
+  $('#catalog-select-current').addEventListener('change', (event) => {
+    toggleCatalogCurrent(event.target.checked);
+  });
+  $('#catalog-collapse').addEventListener('click', collapseCatalog);
+  $('#catalog-search').addEventListener('input', (event) => {
+    state.catalogQuery = event.target.value;
+    renderCatalogNavigation();
+  });
+  $('#catalog-filter').addEventListener('change', (event) => {
+    state.catalogFilter = event.target.value;
+    renderCatalogNavigation();
+  });
+  $('#course-search').addEventListener('input', (event) => {
+    state.courseQuery = event.target.value;
+    renderCourseOptions();
   });
 
   $$('.seg').forEach((node) => {

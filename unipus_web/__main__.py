@@ -14,19 +14,35 @@ from .app import create_app
 from .config import DEFAULT_PORT, HOST, PORT_RANGE
 
 
+def _socket_family(host: str) -> socket.AddressFamily:
+    return socket.AF_INET6 if ":" in host else socket.AF_INET
+
+
+def _is_port_available(host: str, port: int) -> bool:
+    with socket.socket(_socket_family(host), socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind((host, port))
+            return True
+        except OSError:
+            return False
+
+
 def pick_port(host: str, preferred: int | None = None) -> int:
-    candidates = [preferred] if preferred else []
+    candidates = [preferred] if preferred is not None else []
     candidates += [port for port in PORT_RANGE if port != preferred]
     for port in candidates:
-        if port is None:
-            continue
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            try:
-                sock.bind((host, port))
-                return port
-            except OSError:
-                continue
-    raise SystemExit("端口 8765-8799 全部被占用，无法启动。")
+        if _is_port_available(host, port):
+            return port
+
+    # Windows 的 Hyper-V/WSL 会保留整段 TCP 端口（可通过
+    # netsh int ipv4 show excludedportrange protocol=tcp 查看），此时
+    # 8765-8799 可能全部无法绑定。让系统分配一个空闲端口兜底。
+    with socket.socket(_socket_family(host), socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind((host, 0))
+        except OSError as exc:
+            raise SystemExit(f"无法监听 {host}：{exc}") from exc
+        return sock.getsockname()[1]
 
 
 def run(
@@ -38,6 +54,12 @@ def run(
     proxy: str | None = None,
 ) -> None:
     actual_port = pick_port(host, port)
+    if actual_port not in PORT_RANGE:
+        print(
+            f"提示：{PORT_RANGE.start}-{PORT_RANGE.stop - 1} 端口不可用"
+            f"（可能被占用或被 Windows 保留），已自动改用 {actual_port}。",
+            flush=True,
+        )
     app = create_app(
         allow_multi_question=allow_multi_question,
         proxy=proxy,

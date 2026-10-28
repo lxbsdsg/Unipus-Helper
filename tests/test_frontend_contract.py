@@ -19,6 +19,12 @@ def test_required_elements_and_endpoints_exist():
         "catalog-dialog",
         "catalog-tree",
         "catalog-select-all",
+        "catalog-select-current",
+        "catalog-items",
+        "catalog-path",
+        "catalog-search",
+        "catalog-filter",
+        "task-search",
     ]:
         assert selector in html, f"缺少元素：{selector}"
 
@@ -37,6 +43,9 @@ def test_required_elements_and_endpoints_exist():
     # 已保存账号走 credential_id，密码不进入浏览器存储
     assert "credential_id" in js
     assert "localStorage.setItem('password'" not in js
+    # 目录批量选择只提交真正可练习的叶子，已完成/不可做题目不能被计入
+    assert "catalogDescendantLeaves" in js
+    assert "leaf.selectable" in js
 
 
 def test_no_inline_external_scripts():
@@ -50,3 +59,13 @@ def test_styles_support_both_themes():
     assert '[data-theme="dark"]' in css
     assert "prefers-reduced-motion" in css
     assert "focus-visible" in css
+
+
+def test_catalog_ui_has_navigation_and_item_panes():
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    css = (WEB / "style.css").read_text(encoding="utf-8")
+
+    assert 'class="catalog-workbench"' in html
+    assert ".catalog-workbench" in css
+    assert "grid-template-columns: 310px minmax(0, 1fr)" in css
+    assert "@media (max-width: 820px)" in css
