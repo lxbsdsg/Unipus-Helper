@@ -1,7 +1,7 @@
 # Unipus Helper · Python + Web UI 设计
 
 日期：2026-10-21
-状态：待评审
+状态：已实现（v2.0.0）。本文档为设计基线，已于 2026-10-29 与代码对齐；如仍有出入，以代码为准。
 
 ## 1. 意图与背景
 
@@ -59,22 +59,26 @@ Unipus Helper 是一个 U校园（新视野大学英语）自动学习工具，�
 ## 4. 目录结构
 
 ```
-git/
+项目根/
 ├── README.md                     # 使用说明、免责声明、常见问题
 ├── requirements.txt
 ├── run.bat                       # Windows：建 venv → 装依赖 → 启动 → 开浏览器
+├── run-cli.bat                   # Windows：等价于 run.bat --cli
 ├── run.sh                        # Linux/macOS 同上
 ├── pyproject.toml                # 项目元数据 + pytest 配置
+├── scripts/
+│   └── smoke_login.py            # 只读冒烟脚本：登录 + 拉课程列表，不提交
 ├── unipus_web/
 │   ├── __init__.py
-│   ├── __main__.py               # CLI（--host/--port/--no-browser）
+│   ├── __main__.py               # CLI 参数解析、端口探测、Web 启动
+│   ├── cli.py                    # 终端备选模式（--cli）：登录 → 选课/自选 → 学习
 │   ├── app.py                    # FastAPI 实例、路由、WebSocket、静态文件
 │   ├── config.py                 # 域名、路径、常量
 │   ├── events.py                 # EventBus（线程 → asyncio 桥）
 │   ├── logging_setup.py          # 环形日志 Handler + 结构化日志事件
-│   ├── network_log.py            # 网络请求录制（环形缓冲）
+│   ├── network_log.py            # 网络请求录制与脱敏（环形缓冲）
 │   ├── crypto.py                 # JWT、答案 AES 解密、HTML→文本、非法字符清洗
-│   ├── credentials.py            # DPAPI 加密凭据存取
+│   ├── credentials.py            # DPAPI / AES-GCM 凭据与登录态存取
 │   ├── models.py                 # 响应数据模型（dataclass）
 │   ├── api/
 │   │   ├── __init__.py
@@ -87,19 +91,33 @@ git/
 │   │   ├── answer.py             # 答案 JSON 解析
 │   │   ├── submit.py             # 提交体构造（单题 / 多题）
 │   │   ├── task.py               # Task 状态机 + 暂停/恢复/停止
-│   │   ├── learn.py              # 学习主流程
+│   │   ├── learn.py              # 学习主流程 + 全目录刷题
 │   │   ├── manager.py            # TaskManager 单例
 │   │   └── reporter.py           # 报告 zip 生成与脱敏
 │   └── web/
 │       ├── index.html
 │       ├── app.js
 │       └── style.css
-└── tests/
-    ├── test_crypto.py
-    ├── test_course_detail.py
-    ├── test_unit_situation.py
-    ├── test_submit.py
-    └── test_task_state.py
+└── tests/                        # 19 个测试文件，全部离线
+    ├── test_api.py               # HTTP API
+    ├── test_cli.py               # 终端备选模式
+    ├── test_client.py            # U校园 HTTP 客户端
+    ├── test_config.py            # 全局配置
+    ├── test_course_detail.py     # 课程树
+    ├── test_credentials.py       # 凭据存储
+    ├── test_crypto.py            # 加密 / JWT
+    ├── test_events.py            # 事件总线
+    ├── test_frontend_contract.py # 前端契约
+    ├── test_learn.py             # 学习流程 / 全目录刷题
+    ├── test_logging.py           # 日志缓冲
+    ├── test_manager.py           # 任务管理器
+    ├── test_models.py            # 数据模型
+    ├── test_network_log.py       # 网络日志脱敏
+    ├── test_port.py              # 端口探测
+    ├── test_smoke_script.py      # 冒烟脚本
+    ├── test_submit.py            # 提交体
+    ├── test_task_state.py        # 状态机
+    └── test_unit_situation.py    # 单元进度
 ```
 
 ## 5. 核心设计
@@ -233,20 +251,29 @@ git/
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/` | 单页应用 |
-| WS | `/ws` | 事件流 |
+| WS | `/ws` | 事件流，连接即推送 `snapshot` |
 | GET | `/api/tasks` | 任务快照列表 |
-| POST | `/api/tasks` | `{username,password,remember}` → 202 + 任务快照 |
-| POST | `/api/tasks/{id}/start` | 启动 |
+| GET | `/api/tasks/{id}` | 单个任务快照 |
+| POST | `/api/tasks` | `{username,password}` 或 `{credential_id}` → 202 + 任务快照 |
+| POST | `/api/tasks/{id}/start` | 启动（必修任务模式） |
 | POST | `/api/tasks/{id}/pause` | 暂停 |
 | POST | `/api/tasks/{id}/resume` | 恢复 |
 | POST | `/api/tasks/{id}/stop` | 停止 |
+| POST | `/api/tasks/{id}/restart` | 停止并立即重启 |
 | DELETE | `/api/tasks/{id}` | 移除 |
 | GET | `/api/tasks/{id}/courses` | 可选课程/教程树 |
-| POST | `/api/tasks/{id}/choose` | `{courseId,resourceId}` |
+| POST | `/api/tasks/{id}/choose` | `{course_id,resource_id}`（整数编号） |
+| POST | `/api/tasks/{id}/catalog` | 进入全目录刷题（202，后台加载目录） |
+| GET | `/api/tasks/{id}/catalog` | 已加载的完整目录（含完成状态） |
+| POST | `/api/tasks/{id}/catalog/choose` | `{taskIds:[...]}` 自选未完成题目 |
+| GET | `/api/credentials` | 已保存账号列表（不含密码） |
+| POST | `/api/credentials` | 保存账号：`{username,password,label?,task_id?}`；带 `task_id` 时同时导出该任务的加密登录态 |
+| DELETE | `/api/credentials/{id}` | 删除已保存账号 |
 | GET | `/api/logs?after={seq}` | 增量日志 |
-| GET | `/api/network?after={seq}` | 增量请求记录 |
+| GET | `/api/network?after={seq}` | 增量请求记录（已脱敏） |
 | POST | `/api/report` | 生成并下载 zip |
-| POST | `/api/shutdown` | 可选：安全退出 |
+
+设计阶段的 `POST /api/shutdown` 未实现，已从本表移除。
 
 所有错误响应统一：`{"error": {"code": "...", "message": "..."}}`。
 
@@ -263,12 +290,13 @@ pytest>=8          # dev
 
 ## 9. 测试策略
 
-- `test_crypto.py`：JWT 头/claims/签名可验证；AES 解密用固定向量；非法 key 长度报明确错误；HTML→文本；非法字符清洗。
-- `test_course_detail.py`：用内联 JSON 构造课程树，验证 role/base 解析、题型查询、越界/未知类型、时间表。
-- `test_unit_situation.py`：节点索引、缺失 nodeId、递归 children。
-- `test_submit.py`：单题/多题提交体结构、预设模式（空 quesDatas）、题型映射、多题答案隔离。
-- `test_task_state.py`：用假 learn 流程验证 READY→RUNNING→PAUSED→RESUME→STOP；停止后重启 generation 生效；冷却等待可被停止打断。
-- 不写联网集成测试；手工冒烟步骤写进 README。
+共 19 个测试文件，全部离线，按主题分组：
+
+- 解析与协议：`test_crypto.py`（JWT 头/claims/签名、AES 固定向量、非法 key 长度、HTML→文本、字符清洗）、`test_course_detail.py`（role/base 解析、题型查询、越界/未知类型、时间表）、`test_unit_situation.py`（节点索引、缺失 nodeId、递归 children）、`test_models.py`（宽松取值）、`test_submit.py`（单题/多题提交体结构、预设模式、题型映射、多题答案隔离）。
+- 流程与状态：`test_task_state.py`（READY→RUNNING→PAUSED→RESUME→STOP、generation、冷却可打断）、`test_learn.py`（学习主流程、目录合并与自选提交）、`test_manager.py`（任务管理器）。
+- 基础设施：`test_config.py`、`test_events.py`（线程 → asyncio 桥）、`test_logging.py`（环形日志）、`test_network_log.py`（录制与脱敏）、`test_port.py`（端口探测兜底）、`test_credentials.py`（凭据存储）。
+- 接口层：`test_api.py`（HTTP API）、`test_client.py`（U校园 HTTP 客户端）、`test_cli.py`（终端备选模式）、`test_frontend_contract.py`（前端契约）、`test_smoke_script.py`（冒烟脚本本身，不联网执行）。
+- 不写联网集成测试；只读冒烟脚本 `scripts/smoke_login.py` 供用户自行验证，步骤写进 README。
 
 ## 10. 交付判定
 
@@ -326,4 +354,4 @@ pytest>=8          # dev
 - 前端是否使用 Web Component：不使用，保持单文件 JS。
 - 日志持久化：只保留内存环形缓冲（5000 条）+ 可选写文件，默认不写文件。
 - 报告生成后是否自动移除：不留临时文件，`StreamingResponse` 内存生成。
-- 端口占用：启动时检测，自动尝试 8765→8799。
+- 端口占用：启动时检测，自动尝试 8765→8799；整段被占用/保留时由系统分配空闲端口兜底。
