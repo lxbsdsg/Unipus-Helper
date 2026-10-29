@@ -1,5 +1,7 @@
 # Unipus Helper Python + Web UI Implementation Plan
 
+> 状态：已归档。本计划已实施完成（当前版本 v2.0.0），仅作历史记录保留；现状以 `README.md` 与 `docs/superpowers/specs/2026-10-21-unipus-web-design.md` 为准。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 用 Python 实现 Unipus Helper 的全部业务逻辑，提供 FastAPI + 原生前端的 Web UI。
