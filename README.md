@@ -88,6 +88,10 @@ run.bat --cli --catalog
 run.bat --cli --no-prompt --yes
 ```
 
+### Windows EXE 启动
+
+如果你下载的是发布包，解压后直接双击 `UnipusHelper.exe`。程序会打开浏览器并保留控制台日志窗口；关闭该控制台窗口即可停止服务。
+
 ### Windows 双击启动
 
 双击 `run.bat`。脚本会自动创建 `.venv`、安装依赖并启动，浏览器会打开 <http://127.0.0.1:8765/>。

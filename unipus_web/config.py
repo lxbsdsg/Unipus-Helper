@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 APP_NAME = "Unipus Helper"
-VERSION = "2.0.0"
+VERSION = "2.0.1"
 
 # 服务监听
 HOST = "127.0.0.1"
