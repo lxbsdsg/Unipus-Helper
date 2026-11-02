@@ -148,10 +148,7 @@ class TaskManager:
         task = self.get(task_id)
         if task is None:
             return False
-        try:
-            ok = task.start_duration(target_minutes)
-        except ValueError as exc:
-            raise ValueError(str(exc)) from exc
+        ok = task.start_duration(target_minutes)
         self.bus.publish("task.updated", task.snapshot())
         return ok
 
@@ -194,6 +191,11 @@ class TaskManager:
         mode = task.practice_mode
         target_minutes = task.target_minutes
         task.request_stop()
+        worker = task._worker
+        if worker is not None and worker.is_alive():
+            worker.join(timeout=2)
+            if worker.is_alive():
+                return False
         if mode == "duration":
             return task.start_duration(target_minutes)
         return task.start(practice_mode=mode)

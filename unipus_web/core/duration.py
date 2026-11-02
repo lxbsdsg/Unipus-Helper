@@ -91,6 +91,7 @@ def build_duration_targets(course: CourseDetail) -> list[DurationTarget]:
 
 class CourseDurationClient:
     """课程计时的 Engine.IO 3 / Socket.IO 1 同步客户端。"""
+
     socket_connect: Callable[..., object] = staticmethod(connect)
 
     def __init__(
@@ -110,6 +111,18 @@ class CourseDurationClient:
         self._error: Exception | None = None
         self._error_event = threading.Event()
         self._last_payload: dict | None = None
+
+    @property
+    def healthy(self) -> bool:
+        """连接是否仍在读循环中且没有已记录的网络错误。"""
+
+        return (
+            self._socket is not None
+            and not self._closed
+            and self._error is None
+            and self._reader is not None
+            and self._reader.is_alive()
+        )
 
     def connect(self) -> None:
         query = urlencode(

@@ -45,6 +45,7 @@ class FakeDurationClient:
 
     def __init__(self):
         self.connected = False
+        self.healthy = True
         self.closed = False
         self.started = []
         self.stopped = 0
@@ -147,6 +148,50 @@ class FakeCourseClient:
 
     def close(self):
         pass
+
+
+def test_build_duration_targets_handles_page_suffix():
+    course_json = {
+        "name": "课程",
+        "units": [
+            {
+                "id": "unit",
+                "role": "unit",
+                "name": "Unit 1",
+                "children": [
+                    {
+                        "id": "micro",
+                        "role": "section",
+                        "name": "Section",
+                        "children": [
+                            {
+                                "id": "group",
+                                "role": "node",
+                                "name": "Group",
+                                "children": [
+                                    {
+                                        "id": "p_1",
+                                        "role": "link",
+                                        "name": "Page 1",
+                                        "url": "u",
+                                        "ref-out": "r",
+                                        "question_num": 1,
+                                        "base": "single-choice",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    target = build_duration_targets(CourseDetail.from_json(course_json))[0]
+
+    assert target.group_id == "group"
+    assert target.unit_id == "unit"
+    assert target.micro_id == "micro"
+    assert target.route_path == "unit/micro/group/p_1"
 
 
 def test_build_duration_targets_maps_course_route_ids():
@@ -306,7 +351,10 @@ def test_pause_stops_timer_and_resume_starts_new_segment():
     assert task.start_duration(1, target_seconds=3)
 
     deadline = time.monotonic() + 3
-    while not FakeDurationClient.instances[0].started and time.monotonic() < deadline:
+    while (
+        not FakeDurationClient.instances
+        or not FakeDurationClient.instances[0].started
+    ) and time.monotonic() < deadline:
         time.sleep(0.01)
     task.request_pause()
     deadline = time.monotonic() + 3
@@ -320,3 +368,23 @@ def test_pause_stops_timer_and_resume_starts_new_segment():
     client = FakeDurationClient.instances[0]
     assert len(client.started) == 2
     assert client.stopped == 2
+
+
+def test_duration_task_fails_promptly_when_socket_becomes_unhealthy():
+    FakeDurationClient.instances = []
+    task = make_duration_task()
+    task.initialize()
+    assert task.start_duration(30, target_seconds=1800)
+
+    deadline = time.monotonic() + 3
+    while (
+        not FakeDurationClient.instances
+        or not FakeDurationClient.instances[0].started
+    ) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    FakeDurationClient.instances[0].healthy = False
+
+    assert wait_for_status(task, Status.ERROR, timeout=2)
+    task._worker.join(timeout=2)
+    assert "计时连接中断" in (task.error or task.description)
+    assert FakeDurationClient.instances[0].closed

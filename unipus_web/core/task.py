@@ -223,7 +223,11 @@ class Task:
         """以学习时长方式开始；测试可注入短时钟目标。"""
         if not 1 <= target_minutes <= 1440:
             raise ValueError("目标时长必须在 1-1440 分钟之间")
+        if target_seconds is not None and target_seconds < 1:
+            raise ValueError("内部计时目标必须大于 0")
         with self._cond:
+            if self.status is not Status.READY:
+                return False
             self.target_minutes = target_minutes
             self._duration_target_seconds = (
                 target_seconds if target_seconds is not None else target_minutes * 60
@@ -432,6 +436,9 @@ class Task:
                     segment_start = time.monotonic()
                     next_update = segment_start + 1
                     continue
+
+                if not duration_client.healthy:
+                    raise NetworkError("计时连接中断，任务已停止")
 
                 if segment_start is not None:
                     elapsed = completed + max(0, now - segment_start)

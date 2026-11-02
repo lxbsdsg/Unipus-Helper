@@ -513,7 +513,9 @@ async function submitPracticeForm(event) {
   const taskId = state.practiceTaskId;
   const action = $('input[name="practice-mode"]:checked').value === 'catalog'
     ? 'catalog' : 'start';
+  const submit = $('#practice-submit');
   $('#practice-error').hidden = true;
+  submit.disabled = true;
   try {
     const result = await api(`/api/tasks/${encodeURIComponent(taskId)}/${action}`, { method: 'POST' });
     if (result?.ok === false) throw new Error('任务当前无法启动，请稍后重试');
@@ -522,6 +524,8 @@ async function submitPracticeForm(event) {
   } catch (error) {
     $('#practice-error').textContent = error.message;
     $('#practice-error').hidden = false;
+  } finally {
+    submit.disabled = false;
   }
 }
 
@@ -536,12 +540,15 @@ function openDurationSetup(taskId) {
 async function submitDurationForm(event) {
   event.preventDefault();
   const minutes = Number($('#duration-minutes').value);
+  const errorBox = $('#duration-error');
   if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) {
-    $('#duration-error').textContent = '请输入 1–1440 之间的整数分钟';
-    $('#duration-error').hidden = false;
+    errorBox.textContent = '请输入 1–1440 之间的整数分钟';
+    errorBox.hidden = false;
     return;
   }
-  $('#duration-error').hidden = true;
+  const submit = $('#duration-submit');
+  errorBox.hidden = true;
+  submit.disabled = true;
   try {
     const result = await api(`/api/tasks/${encodeURIComponent(state.durationTaskId)}/duration`, {
       method: 'POST',
@@ -551,8 +558,10 @@ async function submitDurationForm(event) {
     $('#duration-dialog').close();
     toast('正在读取课程内容，请稍后选择课程或计时内容', 'success');
   } catch (error) {
-    $('#duration-error').textContent = error.message;
-    $('#duration-error').hidden = false;
+    errorBox.textContent = error.message;
+    errorBox.hidden = false;
+  } finally {
+    submit.disabled = false;
   }
 }
 
@@ -589,7 +598,10 @@ async function submitDurationTargetForm(event) {
   event.preventDefault();
   const target = state.durationTargetSelection;
   if (!target) return;
-  $('#duration-target-error').hidden = true;
+  const errorBox = $('#duration-target-error');
+  const submit = $('#duration-target-submit');
+  errorBox.hidden = true;
+  submit.disabled = true;
   try {
     await api(`/api/tasks/${encodeURIComponent(state.durationTargetTaskId)}/duration/choose`, {
       method: 'POST',
@@ -598,8 +610,10 @@ async function submitDurationTargetForm(event) {
     $('#duration-target-dialog').close();
     toast('已选择计时内容，开始累计学习时长', 'success');
   } catch (error) {
-    $('#duration-target-error').textContent = error.message;
-    $('#duration-target-error').hidden = false;
+    errorBox.textContent = error.message;
+    errorBox.hidden = false;
+  } finally {
+    submit.disabled = false;
   }
 }
 
