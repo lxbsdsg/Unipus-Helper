@@ -17,6 +17,7 @@ class FakeSocket:
     def __init__(self):
         self.incoming = queue.Queue()
         self.sent = []
+        self.server_pongs = 0
         self.lock = threading.Lock()
         self.closed = threading.Event()
 
@@ -31,8 +32,11 @@ class FakeSocket:
                 + ack_id
                 + json.dumps([{"code": 0, "msg": "ok"}])
             )
-        elif message == "40/userActivities,":
+        elif message.startswith("40/userActivities?"):
             self.incoming.put("40/userActivities,")
+        elif message == "2":
+            self.server_pongs += 1
+            self.incoming.put("3")
 
     def recv(self, timeout=None):
         try:
@@ -210,7 +214,7 @@ def test_build_duration_targets_maps_course_route_ids():
 
 def test_duration_client_handshake_events_and_ping(monkeypatch):
     socket = FakeSocket()
-    socket.incoming.put('0{"sid":"s","upgrades":[],"pingInterval":10}')
+    socket.incoming.put('0{"sid":"s","upgrades":[],"pingInterval":200}')
     socket.incoming.put("40")
     monkeypatch.setattr(
         CourseDurationClient, "socket_connect", staticmethod(lambda *args, **kwargs: socket)
@@ -222,14 +226,11 @@ def test_duration_client_handshake_events_and_ping(monkeypatch):
         "group", "unit", "micro", "unit/micro/group", "Reading", "Unit / Reading"
     )
     client.start(target, "course-v2:test", 11)
-    socket.incoming.put("2")
-    deadline = time.monotonic() + 1
-    while "3" not in socket.sent and time.monotonic() < deadline:
-        time.sleep(0.01)
-
     # 复现真实服务先发送默认命名空间 40，再发送 /userActivities 确认。
-    assert "40/userActivities," in socket.sent
-    assert "3" in socket.sent
+    assert any(item.startswith("40/userActivities?") for item in socket.sent)
+    assert "uuid=open-id" in next(
+        item for item in socket.sent if item.startswith("40/userActivities?")
+    )
     start_frame = next(item for item in socket.sent if '"start"' in item)
     start_body = re.match(r"^42/userActivities,\d+(\[.*\])$", start_frame).group(1)
     payload = json.loads(start_body)[1]
@@ -245,6 +246,11 @@ def test_duration_client_handshake_events_and_ping(monkeypatch):
     stop_payload = json.loads(stop_body)[1]
     assert stop_payload["module"] == "group"
     assert stop_payload["moduleGroup"] == "course-v2:test"
+    deadline = time.monotonic() + 1
+    while not ("2" in socket.sent and "3" in socket.sent) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert socket.sent.count("2") >= 1
+    assert socket.server_pongs >= 1
     client.close()
 
 

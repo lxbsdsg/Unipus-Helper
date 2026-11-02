@@ -111,6 +111,7 @@ class CourseDurationClient:
         self._error: Exception | None = None
         self._error_event = threading.Event()
         self._last_payload: dict | None = None
+        self._ping_interval = 25.0
 
     @property
     def healthy(self) -> bool:
@@ -145,7 +146,17 @@ class CourseDurationClient:
             opening = self._recv_sync()
             if not isinstance(opening, str) or not opening.startswith("0"):
                 raise NetworkError("计时服务返回了无效握手")
-            self._send_sync("40/userActivities,")
+            try:
+                handshake = json.loads(opening[1:])
+                self._ping_interval = max(
+                    0.05, float(handshake.get("pingInterval", 25_000)) / 1000
+                )
+            except (ValueError, TypeError):
+                pass
+            namespace_query = urlencode(
+                {"uuid": self.open_id, "token": self.token}
+            )
+            self._send_sync(f"40/userActivities?{namespace_query},")
             # 实际服务会先确认默认命名空间（40），再确认
             # /userActivities；握手期间也要响应 Engine.IO 心跳。
             while True:
@@ -262,14 +273,23 @@ class CourseDurationClient:
 
     def _pump(self) -> None:
         try:
+            next_ping = time.monotonic() + self._ping_interval
             while not self._closed:
+                now = time.monotonic()
+                if now >= next_ping:
+                    # Engine.IO 3 由客户端发送 2，服务端回复 3。
+                    self._send_sync("2")
+                    next_ping = now + self._ping_interval
+                timeout = min(1.0, max(0.01, next_ping - time.monotonic()))
                 try:
-                    message = self._socket.recv(timeout=1) if self._socket else None
+                    message = self._socket.recv(timeout=timeout) if self._socket else None
                 except TimeoutError:
                     continue
                 if message is None:
                     continue
                 if not isinstance(message, str):
+                    continue
+                if message == "3":
                     continue
                 if message == "2":
                     self._send_sync("3")
