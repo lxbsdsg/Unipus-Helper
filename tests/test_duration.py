@@ -207,6 +207,7 @@ def test_build_duration_targets_maps_course_route_ids():
 def test_duration_client_handshake_events_and_ping(monkeypatch):
     socket = FakeSocket()
     socket.incoming.put('0{"sid":"s","upgrades":[],"pingInterval":10}')
+    socket.incoming.put("40")
     monkeypatch.setattr(
         CourseDurationClient, "socket_connect", staticmethod(lambda *args, **kwargs: socket)
     )
@@ -222,6 +223,7 @@ def test_duration_client_handshake_events_and_ping(monkeypatch):
     while "3" not in socket.sent and time.monotonic() < deadline:
         time.sleep(0.01)
 
+    # 复现真实服务先发送默认命名空间 40，再发送 /userActivities 确认。
     assert "40/userActivities," in socket.sent
     assert "3" in socket.sent
     start_frame = next(item for item in socket.sent if '"start"' in item)

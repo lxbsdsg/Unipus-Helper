@@ -146,10 +146,19 @@ class CourseDurationClient:
             if not isinstance(opening, str) or not opening.startswith("0"):
                 raise NetworkError("计时服务返回了无效握手")
             self._send_sync("40/userActivities,")
-            namespace = self._recv_sync()
-            if not isinstance(namespace, str) or not namespace.startswith(
-                "40/userActivities"
-            ):
+            # 实际服务会先确认默认命名空间（40），再确认
+            # /userActivities；握手期间也要响应 Engine.IO 心跳。
+            while True:
+                namespace = self._recv_sync()
+                if namespace == "2":
+                    self._send_sync("3")
+                    continue
+                if isinstance(namespace, str) and namespace.startswith(
+                    "40/userActivities"
+                ):
+                    break
+                if namespace == "40":
+                    continue
                 raise NetworkError("计时服务命名空间连接失败")
         except Exception as exc:
             self._close_socket()
