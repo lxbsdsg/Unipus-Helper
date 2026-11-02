@@ -3,7 +3,7 @@
 
 from PyInstaller.utils.hooks import collect_submodules
 
-hiddenimports = collect_submodules("unipus_web") + collect_submodules("uvicorn")
+hiddenimports = collect_submodules("unipus_web") + collect_submodules("uvicorn") + collect_submodules("websockets")
 
 a = Analysis(
     ["unipus_helper_entry.py"],

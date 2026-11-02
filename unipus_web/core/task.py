@@ -15,6 +15,11 @@ from enum import Enum
 from typing import Callable, Protocol
 
 from ..api.errors import ApiError, AuthError, NetworkError, TaskStopped, UnipusError
+from .duration import (
+    CourseDurationClient,
+    DurationTarget,
+    build_duration_targets,
+)
 from ..models import (
     Course,
     CourseResource,
@@ -41,6 +46,7 @@ class Status(str, Enum):
 class UserOperation(str, Enum):
     CHOOSE_COURSE = "CHOOSE_COURSE"
     CHOOSE_PRACTICE = "CHOOSE_PRACTICE"
+    CHOOSE_DURATION = "CHOOSE_DURATION"
 
 
 class TaskControl(Protocol):
@@ -72,6 +78,8 @@ class Task:
         login_session: dict | None = None,
         on_login_session: Callable[[dict], None] | None = None,
         allow_multi_question: bool = True,
+        duration_client_factory: Callable[[], CourseDurationClient] | None = None,
+        proxy: str | None = None,
     ) -> None:
         self.task_id = task_id
         self.username = username
@@ -79,6 +87,8 @@ class Task:
         self.credential_id = credential_id
         self.login_session = login_session
         self.allow_multi_question = allow_multi_question
+        self._duration_client_factory = duration_client_factory
+        self.proxy = proxy
         self._on_login_session = on_login_session
 
         self._client_factory = client_factory
@@ -101,8 +111,12 @@ class Task:
         self.warning: str | None = None
         self.error: str | None = None
 
-        # 刷题方式：required = 老师勾选，catalog = 全目录自选
+        # 任务方式：required = 必修，catalog = 全目录自选，duration = 学习时长
         self.practice_mode = "required"
+        self.target_minutes = 0
+        self._duration_target_seconds = 0
+        self.duration_targets: list[DurationTarget] = []
+        self.selected_duration_target: DurationTarget | None = None
         self.catalog: dict | None = None
         self.selected_task_ids: list[str] = []
 
@@ -178,6 +192,8 @@ class Task:
             self.practice_mode = practice_mode
             self.catalog = None
             self.selected_task_ids = []
+            self.duration_targets = []
+            self.selected_duration_target = None
             self._generation += 1
             generation = self._generation
             self._stop_event.clear()
@@ -201,13 +217,28 @@ class Task:
         """以全目录自选方式开始；进入选择前会先加载目录。"""
         return self.start(practice_mode="catalog")
 
+    def start_duration(
+        self, target_minutes: int, *, target_seconds: int | None = None
+    ) -> bool:
+        """以学习时长方式开始；测试可注入短时钟目标。"""
+        if not 1 <= target_minutes <= 1440:
+            raise ValueError("目标时长必须在 1-1440 分钟之间")
+        with self._cond:
+            self.target_minutes = target_minutes
+            self._duration_target_seconds = (
+                target_seconds if target_seconds is not None else target_minutes * 60
+            )
+        return self.start(practice_mode="duration")
+
     def _run(self, generation: int) -> None:
         self._tls.generation = generation
         try:
             summary = self._prepare_and_learn(generation)
             if self._is_stale(generation) or self._stop_event.is_set():
                 return
-            if summary is not None and summary.submitted_tasks == 0 and summary.skipped_tasks > 0:
+            if self.practice_mode == "duration":
+                description = "目标学习时长已达到。"
+            elif summary is not None and summary.submitted_tasks == 0 and summary.skipped_tasks > 0:
                 description = "任务已完成（部分题型被跳过，详情见日志）"
             else:
                 description = "任务已完成。"
@@ -273,6 +304,9 @@ class Task:
         # 延迟导入，避免 Task 与 Learn 的循环依赖
         from .learn import learn_course
 
+        if self.practice_mode == "duration":
+            return self._prepare_and_learn_duration(generation, resource)
+
         if self.practice_mode == "catalog":
             return self._prepare_and_practice_catalog(generation, resource)
 
@@ -312,6 +346,131 @@ class Task:
             list(self.selected_task_ids),
             allow_multi_question=self.allow_multi_question,
         )
+
+    def _prepare_and_learn_duration(self, generation: int, resource):
+        from .learn import load_course_context
+
+        self._update(gen=generation, description="正在读取课程计时目录")
+        context = load_course_context(self, self.client, resource)
+        targets = build_duration_targets(context.course)
+        if not targets:
+            raise UnipusError("该教程没有可计时的学习内容")
+
+        with self._cond:
+            if generation != self._generation or self._stop_event.is_set():
+                raise TaskStopped()
+            self.duration_targets = targets
+            if len(targets) == 1:
+                self.selected_duration_target = targets[0]
+            else:
+                self.selected_duration_target = None
+
+        if len(targets) > 1:
+            self._begin_user_operation(
+                UserOperation.CHOOSE_DURATION, generation=generation
+            )
+            self.wait_for_user_operation()
+            if self._stop_event.is_set() or self._is_stale(generation):
+                raise TaskStopped()
+
+        target = self.selected_duration_target
+        if target is None:
+            raise UnipusError("未选择计时内容")
+        return self._learn_duration(generation, context, target)
+
+    def _learn_duration(self, generation: int, context, target: DurationTarget):
+        user = self.user
+        if user is None or not user.open_id:
+            raise UnipusError("尚未登录，无法开始学习时长任务。")
+
+        factory = self._duration_client_factory or (
+            lambda: CourseDurationClient(user.open_id, proxy=self.proxy)
+        )
+        duration_client = factory()
+        self.checkpoint()
+        target_seconds = self._duration_target_seconds
+        completed = 0
+        segment_start: float | None = None
+        self._update(
+            gen=generation,
+            completed=0,
+            total=target_seconds,
+            description=f"正在累计学习时长：{target.name}",
+        )
+
+        try:
+            duration_client.connect()
+            duration_client.start(target, context.course_instance_id, context.resource_id)
+            segment_start = time.monotonic()
+            next_update = time.monotonic() + 1
+
+            while True:
+                with self._cond:
+                    if self._stop_event.is_set() or self._is_stale(generation):
+                        raise TaskStopped()
+                    paused = self.status is Status.PAUSED
+                now = time.monotonic()
+
+                if paused:
+                    if segment_start is not None:
+                        completed += max(0, int(now - segment_start))
+                        segment_start = None
+                        duration_client.stop()
+                        self._update(
+                            gen=generation,
+                            completed=min(completed, target_seconds),
+                            description="计时已暂停，等待恢复",
+                        )
+                    with self._cond:
+                        while self.status is Status.PAUSED:
+                            if self._stop_event.is_set() or self._is_stale(generation):
+                                raise TaskStopped()
+                            self._cond.wait(0.2)
+                    duration_client.start(
+                        target, context.course_instance_id, context.resource_id
+                    )
+                    segment_start = time.monotonic()
+                    next_update = segment_start + 1
+                    continue
+
+                if segment_start is not None:
+                    elapsed = completed + max(0, now - segment_start)
+                    if now >= next_update:
+                        self._update(
+                            gen=generation,
+                            completed=min(int(elapsed), target_seconds),
+                            description=f"正在累计学习时长：{target.name}",
+                        )
+                        next_update = now + 1
+                    if elapsed >= target_seconds:
+                        duration_client.stop()
+                        completed = target_seconds
+                        segment_start = None
+                        break
+
+                time.sleep(0.05)
+        finally:
+            if segment_start is not None:
+                try:
+                    duration_client.stop()
+                except Exception:
+                    logger.warning("Task %s failed to send final duration stop.", self.task_id)
+            try:
+                duration_client.close()
+            except Exception:
+                logger.debug("Task %s duration socket cleanup failed.", self.task_id)
+
+        if self._stop_event.is_set() or self._is_stale(generation):
+            raise TaskStopped()
+        self._update(
+            gen=generation,
+            completed=target_seconds,
+            total=target_seconds,
+            description=f"学习时长已完成：{target.name}",
+        )
+        from .learn import LearnSummary
+
+        return LearnSummary()
 
     def _select_course(self, generation: int, courses: list[Course]) -> None:
         if len(courses) == 1:
@@ -353,11 +512,12 @@ class Task:
             # 用户在这之前已暂停时保留暂停状态，恢复后再回到选择界面
             if self.status is not Status.PAUSED:
                 self.status = Status.NEED_OPERATION
-            self.description = (
-                "请选择要学习的教程"
-                if operation is UserOperation.CHOOSE_COURSE
-                else "请选择要刷的题目"
-            )
+            if operation is UserOperation.CHOOSE_COURSE:
+                self.description = "请选择要学习的教程"
+            elif operation is UserOperation.CHOOSE_PRACTICE:
+                self.description = "请选择要刷的题目"
+            else:
+                self.description = "请选择要累计时长的学习内容"
             self._cond.notify_all()
         self._emit_change()
 
@@ -382,6 +542,23 @@ class Task:
             if self.status is Status.NEED_OPERATION:
                 self.status = Status.RUNNING
                 self.description = "已选择教程，继续学习"
+            self._cond.notify_all()
+        self._emit_change()
+
+    def choose_duration(self, target_id: str) -> None:
+        target = next(
+            (item for item in self.duration_targets if item.group_id == target_id),
+            None,
+        )
+        if target is None:
+            raise ValueError("计时内容不存在")
+        with self._cond:
+            self.selected_duration_target = target
+            self._user_op_done = True
+            self.user_operation = None
+            if self.status is Status.NEED_OPERATION:
+                self.status = Status.RUNNING
+                self.description = "已选择计时内容，继续刷时长"
             self._cond.notify_all()
         self._emit_change()
 
@@ -599,6 +776,13 @@ class Task:
                     self.user_operation.value if self.user_operation else None
                 ),
                 practice_mode=self.practice_mode,
+                target_minutes=self.target_minutes,
+                duration_targets=[item.to_dict() for item in self.duration_targets],
+                selected_duration_target=(
+                    self.selected_duration_target.to_dict()
+                    if self.selected_duration_target
+                    else None
+                ),
                 courses=[course.to_dict() for course in self.course_list],
                 warning=self.warning,
                 error=self.error,

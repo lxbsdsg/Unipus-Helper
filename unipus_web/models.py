@@ -172,6 +172,9 @@ class TaskSnapshot:
     school_name: str = ""
     user_operation: str | None = None
     practice_mode: str = "required"
+    target_minutes: int = 0
+    duration_targets: list[dict] = field(default_factory=list)
+    selected_duration_target: dict | None = None
     courses: list[dict] = field(default_factory=list)
     warning: str | None = None
     error: str | None = None

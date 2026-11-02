@@ -144,6 +144,18 @@ def test_add_task_requires_username_or_credential():
     assert client.post("/api/tasks", json={"password": "p"}).status_code == 422
 
 
+def test_duration_target_validation():
+    client = make_client()
+    created = client.post("/api/tasks", json={"username": "u", "password": "p"})
+    task_id = created.json()["id"]
+    assert client.post(
+        f"/api/tasks/{task_id}/duration", json={"target_minutes": 0}
+    ).status_code == 422
+    assert client.post(
+        f"/api/tasks/{task_id}/duration/choose", json={"target_id": " "}
+    ).status_code == 409
+
+
 def test_bad_host_header_is_rejected():
     client = make_client()
     response = client.get("/", headers={"host": "evil.example"})

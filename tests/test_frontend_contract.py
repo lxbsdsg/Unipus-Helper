@@ -16,6 +16,9 @@ def test_required_elements_and_endpoints_exist():
         "empty-state",
         "log-list",
         "network-list",
+        "practice-dialog",
+        "duration-dialog",
+        "duration-target-dialog",
         "catalog-dialog",
         "catalog-tree",
         "catalog-select-all",
@@ -36,6 +39,8 @@ def test_required_elements_and_endpoints_exist():
         "/ws",
         "/catalog",
         "/catalog/choose",
+        "/duration",
+        "/duration/choose",
     ]:
         assert endpoint in js, f"缺少接口调用：{endpoint}"
 
@@ -46,6 +51,10 @@ def test_required_elements_and_endpoints_exist():
     # 目录批量选择只提交真正可练习的叶子，已完成/不可做题目不能被计入
     assert "catalogDescendantLeaves" in js
     assert "leaf.selectable" in js
+    # 刷题两个范围共用一个入口，时长任务使用独立入口
+    assert "function openPracticeSetup" in js
+    assert "function openDurationSetup" in js
+    assert "formatDuration" in js
 
 
 def test_no_inline_external_scripts():

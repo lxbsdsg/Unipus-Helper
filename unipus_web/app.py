@@ -58,6 +58,14 @@ class ChoosePracticeRequest(BaseModel):
     task_ids: list[str]
 
 
+class StartDurationRequest(BaseModel):
+    target_minutes: int
+
+
+class ChooseDurationRequest(BaseModel):
+    target_id: str
+
+
 class CredentialRequest(BaseModel):
     username: str
     password: str
@@ -94,6 +102,7 @@ def create_app(
         credentials=credentials,
         allow_multi_question=allow_multi_question,
         client_factory=client_factory,
+        proxy=proxy,
     )
 
     setup_logging(log_store)
@@ -207,6 +216,36 @@ def create_app(
         return Response(status_code=204)
 
     # ------------------------------------------------------------ 全目录刷题
+
+    @app.post("/api/tasks/{task_id}/duration", status_code=202)
+    def start_duration(task_id: str, payload: StartDurationRequest):
+        require_task(task_id)
+        if not 1 <= payload.target_minutes <= 1440:
+            raise HTTPException(422, "目标时长必须在 1-1440 分钟之间")
+        try:
+            ok = manager.start_duration(task_id, payload.target_minutes)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if not ok:
+            raise HTTPException(409, "任务当前无法开始刷时长")
+        return {"ok": True}
+
+    @app.post("/api/tasks/{task_id}/duration/choose", status_code=204)
+    def choose_duration(task_id: str, payload: ChooseDurationRequest):
+        task = require_task(task_id)
+        if (
+            task.status is not Status.NEED_OPERATION
+            or task.user_operation is not UserOperation.CHOOSE_DURATION
+        ):
+            raise HTTPException(409, "任务当前不在选择计时内容状态")
+        target_id = payload.target_id.strip()
+        if not target_id:
+            raise HTTPException(400, "必须选择计时内容")
+        try:
+            manager.choose_duration(task_id, target_id)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return Response(status_code=204)
 
     @app.post("/api/tasks/{task_id}/catalog", status_code=202)
     def start_catalog(task_id: str):
