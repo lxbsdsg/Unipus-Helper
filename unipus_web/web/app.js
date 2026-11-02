@@ -274,7 +274,39 @@ function renderTask(task) {
   const controls = el('div', 'task-controls');
   controls.append(...taskControls(task));
   row.append(main, progress, controls);
+  const choices = taskChoices(task, (action) => runTaskAction(task.id, action));
+  if (choices) row.append(choices);
   return row;
+}
+
+function taskChoices(task, onAction) {
+  if (!['READY', 'NEED_OPERATION'].includes(task.status)) return null;
+  const section = el('section', 'task-choices');
+  section.setAttribute('aria-label', task.status === 'READY' ? '选择刷题模式' : '继续设置任务');
+  section.append(el('h4', 'choice-heading', task.status === 'READY' ? '选择刷题模式' : '下一步'));
+  const choices = el('div', 'choice-grid');
+  const add = (title, description, next, action) => {
+    const card = button(null, 'choice-card', () => onAction(action));
+    card.dataset.action = action;
+    card.dataset.id = task.id;
+    card.append(el('strong', 'choice-title', title), el('span', 'choice-description', description),
+      el('span', 'choice-next', `${next} →`));
+    choices.append(card);
+  };
+  if (task.status === 'READY') {
+    add('老师布置的必修', '完成老师勾选的未完成必修内容。只有一门课程和教程时，会自动开始学习。',
+      '启动必修任务', 'start');
+    add('全目录自选题目', '浏览教程的完整目录，自选可练习的题目；确认题目后才开始刷题。',
+      '加载课程与目录', 'catalog');
+  } else if (task.user_operation === 'CHOOSE_PRACTICE') {
+    add('选择要刷的题目', '按单元或小节勾选题目，查看已选数量后确认开始。', '打开题目选择', 'catalog');
+  } else {
+    add('选择课程与教程', task.practice_mode === 'catalog'
+      ? '先选课程和教程，再进入目录选择题目。'
+      : '先选课程和教程，确认后开始完成未完成的必修内容。', '打开课程选择', 'choose');
+  }
+  section.append(choices);
+  return section;
 }
 
 function taskControls(task) {
@@ -288,8 +320,6 @@ function taskControls(task) {
 
   switch (task.status) {
     case 'READY':
-      controls.push(action('开始', 'start', 'btn btn-primary btn-sm'));
-      controls.push(action('全目录刷题', 'catalog', 'btn btn-ghost btn-sm'));
       break;
     case 'RUNNING':
       controls.push(action('暂停', 'pause'), action('停止', 'stop'));
@@ -301,10 +331,6 @@ function taskControls(task) {
       controls.push(action('暂停', 'pause'), action('停止', 'stop'));
       break;
     case 'NEED_OPERATION': {
-      const practice = task.user_operation === 'CHOOSE_PRACTICE';
-      controls.push(
-        action(practice ? '选择题目' : '选择教程', practice ? 'catalog' : 'choose', 'btn btn-primary btn-sm')
-      );
       controls.push(action('暂停', 'pause'));
       break;
     }
@@ -381,6 +407,8 @@ function renderManage(task) {
     row.append(el('dt', null, label), el('dd', null, value));
     body.append(row);
   }
+  const choices = taskChoices(task, (action) => manageAction(task, action));
+  if (choices) body.append(choices);
 
   const actions = $('#manage-actions');
   actions.textContent = '';
@@ -389,8 +417,6 @@ function renderManage(task) {
 
   switch (task.status) {
     case 'READY':
-      add('开始', 'start', 'btn btn-primary btn-sm');
-      add('全目录刷题', 'catalog', 'btn btn-ghost btn-sm');
       break;
     case 'RUNNING':
     case 'WAITING':
@@ -402,12 +428,6 @@ function renderManage(task) {
       add('停止', 'stop', 'btn btn-ghost btn-sm');
       break;
     case 'NEED_OPERATION': {
-      const practice = task.user_operation === 'CHOOSE_PRACTICE';
-      add(
-        practice ? '选择题目' : '选择教程',
-        practice ? 'catalog' : 'choose',
-        'btn btn-primary btn-sm'
-      );
       break;
     }
     case 'ERROR':
@@ -483,13 +503,15 @@ function renderCourseOptions() {
   resourceBox.textContent = '';
   const query = state.courseQuery.trim().toLowerCase();
   const courses = selection.courses.filter((course) =>
-    !query || (course.name || '').toLowerCase().includes(query)
+    !query || (course.name || '').toLowerCase().includes(query) ||
+    (course.resources || []).some((resource) => (resource.name || '').toLowerCase().includes(query))
   );
   $('#course-option-count').textContent = `${courses.length} 门`;
 
   if (!selection.courses.length) {
     courseBox.append(el('div', 'saved-empty', '没有可选课程'));
     $('#resource-option-count').textContent = '0 个';
+    updateCourseSelection();
     return;
   }
   if (!courses.length) {
@@ -497,22 +519,41 @@ function renderCourseOptions() {
   }
 
   for (const course of courses) {
-    const node = el('button', 'option', course.name || `课程 ${course.id}`);
-    node.type = 'button';
-    node.setAttribute('role', 'option');
-    node.setAttribute('aria-selected', 'false');
-    node.addEventListener('click', () => {
+    const node = courseOption('course', course.name || `课程 ${course.id}`,
+      `${(course.resources || []).length} 个教程`, selection.course?.id === course.id, () => {
       selection.course = course;
       selection.resource = null;
-      $$('.option', courseBox).forEach((item) => {
-        item.classList.toggle('is-selected', item === node);
-        item.setAttribute('aria-selected', item === node ? 'true' : 'false');
-      });
       renderResourceOptions();
     });
     courseBox.append(node);
   }
   renderResourceOptions();
+}
+
+function courseOption(name, title, description, checked, onChange) {
+  const node = el('label', 'option');
+  const radio = el('input', 'option-radio');
+  radio.type = 'radio';
+  radio.name = name;
+  radio.checked = checked;
+  radio.addEventListener('change', onChange);
+  const content = el('span', 'option-content');
+  content.append(el('strong', null, title), el('small', null, description));
+  node.append(radio, content, el('span', 'option-selected', '已选'));
+  return node;
+}
+
+function updateCourseSelection() {
+  const { course, resource } = state.courseSelection;
+  const catalog = state.tasks.get(state.courseTaskId)?.practice_mode === 'catalog';
+  $('#course-selection-summary').textContent = resource
+    ? `已选：${course.name || '课程'} / ${resource.name || '教程'}`
+    : course ? `已选课程：${course.name || '课程'}，请继续选择教程` : '请选择一门课程，再选择教程';
+  $('#course-submit').disabled = !course || !resource;
+  $('#course-submit').textContent = catalog ? '确认教程，继续选题' : '确认并开始必修';
+  $('#course-next-hint').textContent = catalog
+    ? '选择教程后，继续从目录勾选题目。' : '确认后将开始学习该教程中未完成的必修内容。';
+  $('#course-error').hidden = true;
 }
 
 function renderResourceOptions() {
@@ -522,13 +563,15 @@ function renderResourceOptions() {
   const query = state.courseQuery.trim().toLowerCase();
   const resources = selection.course
     ? (selection.course.resources || []).filter((resource) =>
-        !query || (resource.name || '').toLowerCase().includes(query)
+        !query || (selection.course.name || '').toLowerCase().includes(query) ||
+        (resource.name || '').toLowerCase().includes(query)
       )
     : [];
   $('#resource-option-count').textContent = `${resources.length} 个`;
+  updateCourseSelection();
 
   if (!resources.length) {
-    let message = '先选择左侧课程';
+    let message = '请先选择课程';
     if (selection.course) {
       message = (selection.course.resources || []).length
         ? '没有匹配的教程'
@@ -539,18 +582,11 @@ function renderResourceOptions() {
   }
 
   for (const resource of resources) {
-    const node = el('button', 'option', resource.name || `教程 ${resource.id}`);
-    node.type = 'button';
-    node.setAttribute('role', 'option');
-    node.setAttribute('aria-selected', 'false');
-    const meta = el('small', null, `必修 ${resource.finish_point_num}/${resource.total_point_num}`);
-    node.append(meta);
-    node.addEventListener('click', () => {
+    const node = courseOption('resource', resource.name || `教程 ${resource.id}`,
+      `必修已完成 ${resource.finish_point_num ?? 0} / ${resource.total_point_num ?? 0}`,
+      selection.resource?.id === resource.id, () => {
       selection.resource = resource;
-      $$('.option', box).forEach((item) => {
-        item.classList.toggle('is-selected', item === node);
-        item.setAttribute('aria-selected', item === node ? 'true' : 'false');
-      });
+      updateCourseSelection();
     });
     box.append(node);
   }
@@ -697,7 +733,8 @@ function catalogNodeCheckbox(node, onChange) {
   checkbox.type = 'checkbox';
   checkbox.className = 'catalog-check';
   checkbox.dataset.nodeId = catalogNodeKey(node);
-  checkbox.setAttribute('aria-label', `${catalogLabel(node)}，选择全部可练习题目`);
+  checkbox.setAttribute('aria-label', catalogIsLeaf(node)
+    ? `选择题目：${catalogLabel(node)}` : `选择 ${catalogLabel(node)} 中符合筛选的可练习题目`);
   checkbox.disabled = !(state.catalogLeavesById.get(checkbox.dataset.nodeId) || []).length;
   checkbox.addEventListener('click', (event) => event.stopPropagation());
   checkbox.addEventListener('change', () => {
@@ -737,7 +774,7 @@ function renderCatalogNavigation(preserveSelection = false) {
 
 function renderCatalogNode(node, depth) {
   const children = node.children || [];
-  const row = el('div', 'catalog-row');
+  const row = el(children.length ? 'div' : 'label', 'catalog-row');
   const nodeKey = catalogNodeKey(node);
 
   if (children.length) {
@@ -757,7 +794,10 @@ function renderCatalogNode(node, depth) {
     const checkbox = catalogNodeCheckbox(node, (checked) =>
       setCatalogGroupSelection(node, checked)
     );
-    summary.append(checkbox, el('span', 'catalog-name', catalogLabel(node)));
+    const checkTarget = el('label', 'catalog-check-target');
+    checkTarget.append(checkbox);
+    checkTarget.addEventListener('click', (event) => event.stopPropagation());
+    summary.append(checkTarget, el('span', 'catalog-name', catalogLabel(node)));
     summary.append(el('span', 'catalog-count', `${leaves.length} 题`));
     summary.addEventListener('click', (event) => {
       if (event.target.closest('.catalog-check')) return;
@@ -878,14 +918,14 @@ function renderCatalogItems() {
   $('#catalog-items-empty').hidden = visible.length > 0;
 
   for (const child of visible) {
-    const row = el('div', 'catalog-leaf-row');
+    const row = el('label', 'catalog-leaf-row');
     row.classList.toggle('is-complete', catalogStatus(child) === 'done');
     row.classList.toggle('is-unsupported', !child.selectable && catalogStatus(child) !== 'done');
     const checkbox = catalogNodeCheckbox(child, (checked) => {
       if (checked) state.catalogSelection.add(child.id);
       else state.catalogSelection.delete(child.id);
     });
-    const details = el('div', 'catalog-item-details');
+    const details = el('span', 'catalog-item-details');
     details.append(el('span', 'catalog-name', catalogLabel(child)));
     const path = catalogPathKeys(catalogNodeKey(child)).slice(0, -1).map((key) => {
       const ancestor = state.catalogNodeByKey.get(key);
@@ -895,7 +935,7 @@ function renderCatalogItems() {
     facts.unshift(path);
     details.append(el('span', 'catalog-item-types', facts.filter(Boolean).join(' · ')));
 
-    const meta = el('div', 'catalog-meta');
+    const meta = el('span', 'catalog-meta');
     const status = el('span', 'catalog-status');
     const statusKey = catalogStatus(child);
     status.dataset.status = statusKey;
@@ -920,7 +960,8 @@ function syncCatalogChecks(preserveSelection = true) {
   $$('.catalog-check', $('#catalog-tree')).forEach((checkbox) => {
     const key = checkbox.dataset.nodeId;
     const node = state.catalogNodeByKey.get(key);
-    const visibleLeaves = node ? catalogDescendantLeaves(node).filter(catalogMatches) : [];
+    const visibleLeaves = node ? catalogDescendantLeaves(node)
+      .filter((leaf) => leaf.selectable && catalogMatches(leaf)) : [];
     const visibleResult = {
       leaves: visibleLeaves,
       selected: visibleLeaves.filter((leaf) => state.catalogSelection.has(leaf.id)).length,
@@ -931,12 +972,7 @@ function syncCatalogChecks(preserveSelection = true) {
       visibleResult.selected < visibleResult.leaves.length;
     const result = visibleResult;
     const leaves = result.leaves;
-    if (!leaves.length) {
-      checkbox.checked = false;
-      checkbox.indeterminate = false;
-      checkbox.disabled = true;
-      return;
-    }
+    checkbox.disabled = !leaves.length;
     checkbox.checked = result.checked;
     checkbox.indeterminate = result.indeterminate;
   });
@@ -950,13 +986,14 @@ function syncCatalogChecks(preserveSelection = true) {
 
   const current = state.catalogNodeByKey.get(state.catalogCurrentKey);
   if (current) {
-    const result = catalogChecked(state.catalogCurrentKey);
     const selectCurrent = $('#catalog-select-current');
-    selectCurrent.checked = result.checked;
-    selectCurrent.indeterminate = result.indeterminate;
     const selectableLeaves = catalogDescendantLeaves(current).filter((leaf) => leaf.selectable).length;
     const filteredLeaves = catalogDescendantLeaves(current).filter(catalogMatches);
-    selectCurrent.disabled = selectableLeaves === 0;
+    const selectable = filteredLeaves.filter((leaf) => leaf.selectable);
+    const selected = selectable.filter((leaf) => state.catalogSelection.has(leaf.id)).length;
+    selectCurrent.checked = selectable.length > 0 && selected === selectable.length;
+    selectCurrent.indeterminate = selected > 0 && selected < selectable.length;
+    selectCurrent.disabled = selectable.length === 0;
     $('#catalog-current-total').textContent =
       `${filteredLeaves.length} 道符合筛选 · 共 ${selectableLeaves} 道可练习`;
   }
@@ -964,6 +1001,7 @@ function syncCatalogChecks(preserveSelection = true) {
   const count = state.catalogSelection.size;
   $('#catalog-summary').textContent = `已选 ${count} 道题`;
   $('#catalog-start').disabled = count === 0;
+  $('#catalog-start').textContent = count ? `开始刷题（${count} 道）` : '请先选择题目';
 }
 
 function selectAllCatalog() {
