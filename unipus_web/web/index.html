@@ -13,7 +13,7 @@
   <div class="workspace-shell">
     <aside class="sidebar">
       <div class="brand">
-        <span class="brand-mark" aria-hidden="true">U</span>
+        <a class="brand-mark" href="https://github.com/lxbsdsg/Unipus-Helper" target="_blank" rel="noopener noreferrer" aria-label="在新标签页打开 Unipus Helper 项目地址" title="在新标签页打开项目地址">U</a>
         <span class="brand-text">
           <span class="brand-name">Unipus Helper</span>
           <span class="brand-sub">学习工作台</span>
@@ -219,32 +219,33 @@
   <dialog id="course-dialog" class="dialog dialog-wide">
     <form id="course-form" class="dialog-form">
       <header class="dialog-head">
-        <div><span class="dialog-kicker">课程目录</span><h2>选择课程与教程</h2></div>
+        <div><span class="dialog-kicker">课程目录</span><h2>选择课程与教程</h2><p id="course-next-hint" class="dialog-subtitle"></p></div>
         <button type="button" class="icon-btn" data-close aria-label="关闭">×</button>
       </header>
       <div class="directory-selection">
         <div class="selection-toolbar">
           <label class="search-control">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="5.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M15 15l4 4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
-            <input id="course-search" type="search" aria-label="筛选课程" placeholder="筛选课程或教程">
+            <input id="course-search" type="search" aria-label="筛选课程或教程" placeholder="筛选课程或教程">
           </label>
           <span class="selection-hint">选择课程后，继续选择教程</span>
         </div>
         <div class="course-grid">
           <section class="directory-column">
-            <header class="directory-column-head"><h3>课程</h3><span id="course-option-count" class="directory-count">0</span></header>
-            <div id="course-options" class="option-list" role="listbox" aria-label="课程"></div>
+            <header class="directory-column-head"><h3>1. 选择课程</h3><span id="course-option-count" class="directory-count">0</span></header>
+            <div id="course-options" class="option-list" role="radiogroup" aria-label="课程"></div>
           </section>
           <section class="directory-column">
-            <header class="directory-column-head"><h3>教程</h3><span id="resource-option-count" class="directory-count">0</span></header>
-            <div id="resource-options" class="option-list" role="listbox" aria-label="教程"></div>
+            <header class="directory-column-head"><h3>2. 选择教程</h3><span id="resource-option-count" class="directory-count">0</span></header>
+            <div id="resource-options" class="option-list" role="radiogroup" aria-label="教程"></div>
           </section>
         </div>
       </div>
+      <p id="course-selection-summary" class="selection-summary" role="status">请选择一门课程，再选择教程</p>
       <p id="course-error" class="form-error" role="alert" hidden></p>
       <footer class="dialog-foot">
         <button type="button" class="btn btn-ghost" data-close>取消</button>
-        <button type="submit" class="btn btn-primary">确认选择</button>
+        <button type="submit" class="btn btn-primary" id="course-submit" disabled>确认并开始必修</button>
       </footer>
     </form>
   </dialog>
@@ -283,7 +284,7 @@
               <option value="blocked">不可练习</option>
             </select>
           </div>
-            <div id="catalog-tree" class="catalog-tree" role="tree" aria-label="题目目录" tabindex="0"></div>
+            <div id="catalog-tree" class="catalog-tree" role="group" aria-label="题目目录"></div>
           <div id="catalog-nav-empty" class="catalog-no-result" hidden>没有匹配的目录</div>
         </section>
 
@@ -297,10 +298,10 @@
           </header>
           <nav id="catalog-path" class="catalog-path" aria-label="当前目录路径"></nav>
           <div class="catalog-tools">
-            <label class="check compact"><input id="catalog-select-current" type="checkbox"><span>选择当前目录</span></label>
+            <label class="check compact"><input id="catalog-select-current" type="checkbox"><span>全选当前筛选结果</span></label>
             <span id="catalog-current-total" class="catalog-current-total">0 道可练习</span>
-            <button type="button" class="btn btn-ghost btn-sm" id="catalog-select-all">全选未完成</button>
-            <button type="button" class="btn btn-ghost btn-sm" id="catalog-clear">清空</button>
+            <button type="button" class="btn btn-ghost btn-sm" id="catalog-select-all" title="选择所有目录中符合当前筛选的可练习题目">跨目录全选</button>
+            <button type="button" class="btn btn-ghost btn-sm" id="catalog-clear">清空已选</button>
           </div>
           <div class="catalog-item-table">
             <div class="catalog-table-head" aria-hidden="true">
@@ -309,7 +310,7 @@
             <div id="catalog-items" class="catalog-items" aria-live="polite"></div>
           </div>
           <div id="catalog-items-empty" class="catalog-no-result" hidden>此目录没有匹配的题目</div>
-          <p class="catalog-note">已完成的题目不可选；选择目录或小节会包含其中所有可练习题目。</p>
+          <p class="catalog-note">点击目录名称查看题目；勾选目录可批量选择符合筛选的题目。题目整行可点，已完成或不可练习的题目不能选；切换筛选会保留已选题目。</p>
         </section>
       </div>
       <p id="catalog-error" class="form-error" role="alert" hidden></p>
