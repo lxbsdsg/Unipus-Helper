@@ -214,7 +214,7 @@ class CourseDurationClient:
             separators=(",", ":"),
         )
         try:
-            self._send_sync(f"42/userActivities,{ack_id},{body}")
+            self._send_sync(f"42/userActivities,{ack_id}{body}")
         except Exception as exc:
             self._fail(exc)
             raise NetworkError(f"计时请求发送失败：{exc}") from exc

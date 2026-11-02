@@ -1,4 +1,5 @@
 import json
+import re
 import queue
 import threading
 import time
@@ -22,10 +23,13 @@ class FakeSocket:
     def send(self, message):
         with self.lock:
             self.sent.append(message)
-        if message.startswith("42/userActivities,"):
-            ack_id = message.split(",", 2)[1]
+        match = re.match(r"^42/userActivities,(\d+)", message)
+        if match:
+            ack_id = match.group(1)
             self.incoming.put(
-                f"43/userActivities,{ack_id}" + json.dumps([{"code": 0, "msg": "ok"}])
+                "43/userActivities,"
+                + ack_id
+                + json.dumps([{"code": 0, "msg": "ok"}])
             )
         elif message == "40/userActivities,":
             self.incoming.put("40/userActivities,")
@@ -227,7 +231,8 @@ def test_duration_client_handshake_events_and_ping(monkeypatch):
     assert "40/userActivities," in socket.sent
     assert "3" in socket.sent
     start_frame = next(item for item in socket.sent if '"start"' in item)
-    payload = json.loads(start_frame.split(",", 2)[2])[1]
+    start_body = re.match(r"^42/userActivities,\d+(\[.*\])$", start_frame).group(1)
+    payload = json.loads(start_body)[1]
     assert payload["module"] == "group"
     assert payload["moduleGroup"] == "course-v2:test"
     assert payload["tag1"] == "unit"
@@ -236,7 +241,8 @@ def test_duration_client_handshake_events_and_ping(monkeypatch):
     assert isinstance(payload["timer"], int)
     client.stop()
     stop_frame = next(item for item in socket.sent if '"stop"' in item)
-    stop_payload = json.loads(stop_frame.split(",", 2)[2])[1]
+    stop_body = re.match(r"^42/userActivities,\d+(\[.*\])$", stop_frame).group(1)
+    stop_payload = json.loads(stop_body)[1]
     assert stop_payload["module"] == "group"
     assert stop_payload["moduleGroup"] == "course-v2:test"
     client.close()
