@@ -29,6 +29,7 @@ from .core.task import Status, UserOperation
 from .credentials import CredentialStore
 from .events import EventBus
 from .logging_setup import LogStore, setup_logging
+from .models import parse_duration_param
 from .network_log import NetworkRecorder, redact_record
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,18 @@ class ChooseCourseRequest(BaseModel):
 
 class ChoosePracticeRequest(BaseModel):
     task_ids: list[str]
+
+
+class StartDurationRequest(BaseModel):
+    """进入刷时长模式；具体时长在选定计时内容时通过 duration/choose 提供。"""
+
+
+class ChooseDurationRequest(BaseModel):
+    # 并行计时可一次选择多个内容；target_id 保留以兼容旧前端
+    target_ids: list[str] | None = None
+    target_id: str | None = None
+    # 每个练习的时长："30"（固定秒）或 "10,30"（随机范围）
+    duration: str | None = None
 
 
 class CredentialRequest(BaseModel):
@@ -94,6 +107,7 @@ def create_app(
         credentials=credentials,
         allow_multi_question=allow_multi_question,
         client_factory=client_factory,
+        proxy=proxy,
     )
 
     setup_logging(log_store)
@@ -207,6 +221,39 @@ def create_app(
         return Response(status_code=204)
 
     # ------------------------------------------------------------ 全目录刷题
+
+    @app.post("/api/tasks/{task_id}/duration", status_code=202)
+    def start_duration(task_id: str, payload: StartDurationRequest):
+        require_task(task_id)
+        if not manager.start_duration(task_id):
+            raise HTTPException(409, "任务当前无法开始刷时长")
+        return {"ok": True}
+
+    @app.post("/api/tasks/{task_id}/duration/choose", status_code=204)
+    def choose_duration(task_id: str, payload: ChooseDurationRequest):
+        task = require_task(task_id)
+        if (
+            task.status is not Status.NEED_OPERATION
+            or task.user_operation is not UserOperation.CHOOSE_DURATION
+        ):
+            raise HTTPException(409, "任务当前不在选择计时内容状态")
+        raw_ids = payload.target_ids
+        if raw_ids is None:
+            raw_ids = [payload.target_id] if payload.target_id else []
+        target_ids = [item.strip() for item in raw_ids if item and item.strip()]
+        if not target_ids:
+            raise HTTPException(400, "必须选择计时内容")
+        duration_param = None
+        if payload.duration is not None and payload.duration.strip():
+            try:
+                duration_param = parse_duration_param(payload.duration)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+        try:
+            manager.choose_duration(task_id, target_ids, duration_param)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return Response(status_code=204)
 
     @app.post("/api/tasks/{task_id}/catalog", status_code=202)
     def start_catalog(task_id: str):

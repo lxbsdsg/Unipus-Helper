@@ -1,6 +1,6 @@
 import logging
 
-from unipus_web.logging_setup import BusLogHandler, LogStore
+from unipus_web.logging_setup import BusLogHandler, LogStore, setup_logging
 
 
 def test_log_store_keeps_capacity_and_filters_and_sequences():
@@ -35,3 +35,16 @@ def test_clear_empties_the_store():
     store.add("INFO", "t", "x")
     store.clear()
     assert store.query() == []
+
+
+def test_websocket_debug_traffic_stays_out_of_reports():
+    store = LogStore()
+    old_level = logging.getLogger("websockets").level
+    try:
+        setup_logging(store)
+        logging.getLogger("websockets").debug(
+            "GET /unipusio/?token=secret HTTP/1.1"
+        )
+        assert not store.query()
+    finally:
+        logging.getLogger("websockets").setLevel(old_level)

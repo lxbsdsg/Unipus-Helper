@@ -125,6 +125,25 @@ def make_client():
     return TestClient(app)
 
 
+class TwoTargetClient(FakeClient):
+    """同一单元下两个可计时叶子，用于触发时长内容选择流程。"""
+
+    def get_all_tasks(self, course_instance_id):
+        payload = super().get_all_tasks(course_instance_id)
+        unit = payload["course"]["units"][0]
+        unit["children"] = [
+            dict(unit["children"][0], id="t1", name="Reading 1"),
+            dict(unit["children"][0], id="t2", name="Reading 2"),
+        ]
+        return payload
+
+
+def make_two_target_client():
+    app = create_app(testing=True)
+    app.state.manager.client_factory = lambda tid: TwoTargetClient()
+    return TestClient(app)
+
+
 def test_index_and_empty_snapshot():
     client = make_client()
     assert client.get("/").status_code == 200
@@ -142,6 +161,58 @@ def test_add_task_requires_username_or_credential():
     client = make_client()
     assert client.post("/api/tasks", json={}).status_code == 422
     assert client.post("/api/tasks", json={"password": "p"}).status_code == 422
+
+
+def test_duration_target_validation():
+    client = make_client()
+    created = client.post("/api/tasks", json={"username": "u", "password": "p"})
+    task_id = created.json()["id"]
+    # /duration 只负责进入时长模式（课程/内容/时长随后选择），不再校验时长
+    assert client.post(f"/api/tasks/{task_id}/duration", json={}).status_code == 202
+    # 任务未进入“选择计时内容”状态时，选择接口一律 409
+    assert client.post(
+        f"/api/tasks/{task_id}/duration/choose",
+        json={"target_id": " ", "duration": "30"},
+    ).status_code == 409
+    # 兼容新字段：空列表同样被拒绝
+    assert client.post(
+        f"/api/tasks/{task_id}/duration/choose",
+        json={"target_ids": [" ", ""], "duration": "30"},
+    ).status_code == 409
+
+
+def test_duration_choose_validates_targets_and_duration():
+    client = make_two_target_client()
+    created = client.post("/api/tasks", json={"username": "u", "password": "p"})
+    task_id = created.json()["id"]
+    task = client.app.state.manager._wait_ready(task_id)
+    assert task is not None
+
+    assert client.post(f"/api/tasks/{task_id}/duration", json={}).status_code == 202
+    deadline = time.time() + 3
+    while time.time() < deadline and task.status.value != "NEED_OPERATION":
+        time.sleep(0.02)
+    assert task.status.value == "NEED_OPERATION"
+    assert task.user_operation.value == "CHOOSE_DURATION"
+    ids = [target["group_id"] for target in task.snapshot()["duration_targets"]]
+    assert len(ids) == 2
+
+    # 非法时长与未知内容都会被拒绝
+    assert client.post(
+        f"/api/tasks/{task_id}/duration/choose",
+        json={"target_ids": [ids[0]], "duration": "10,5"},
+    ).status_code == 400
+    assert client.post(
+        f"/api/tasks/{task_id}/duration/choose",
+        json={"target_ids": ["nope"], "duration": "30"},
+    ).status_code == 400
+
+    # 合法请求进入计时并回到 RUNNING
+    assert client.post(
+        f"/api/tasks/{task_id}/duration/choose",
+        json={"target_ids": ids, "duration": "10,30"},
+    ).status_code == 204
+    assert task.snapshot()["duration_param"] == "10,30"
 
 
 def test_bad_host_header_is_rejected():

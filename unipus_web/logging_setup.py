@@ -139,4 +139,6 @@ def setup_logging(log_store: LogStore, level: int = logging.DEBUG) -> None:
     # 降低第三方噪音
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.INFO)
+    # websockets 调试日志会输出含 token 的握手 URL，不能进入内存日志和报告
+    logging.getLogger("websockets").setLevel(logging.WARNING)
     _configured = True

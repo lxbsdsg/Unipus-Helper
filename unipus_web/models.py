@@ -82,6 +82,62 @@ def as_str(value: Any, default: str = "") -> str:
     return str(value)
 
 
+# 单个练习的学习时长上限（秒），约 24 小时；固定值与随机范围同样受此约束
+DURATION_MAX_SECONDS = 86_400
+
+
+def validate_duration_param(param: Any) -> int | tuple[int, int]:
+    """校验每个练习的时长参数，返回归一化后的值。
+
+    int          -> 固定秒数
+    (lo, hi)     -> 每个练习在 lo~hi 秒之间随机
+    非法输入抛 ValueError，消息可直接展示给用户。
+    """
+    if isinstance(param, tuple):
+        if len(param) != 2:
+            raise ValueError("时长范围格式为 (最小值, 最大值)")
+        lo, hi = param
+        if not isinstance(lo, int) or not isinstance(hi, int):
+            raise ValueError("时长必须是整数秒或 (最小值, 最大值)")
+    elif isinstance(param, int) and not isinstance(param, bool):
+        lo = hi = param
+    else:
+        raise ValueError("时长必须是整数秒或 (最小值, 最大值)")
+    if lo < 1 or hi < 1:
+        raise ValueError("时长至少为 1 秒")
+    if lo > hi:
+        raise ValueError("范围下限不能大于上限")
+    if hi > DURATION_MAX_SECONDS:
+        raise ValueError(f"时长不能超过 {DURATION_MAX_SECONDS} 秒")
+    return param
+
+
+def parse_duration_param(text: Any) -> int | tuple[int, int]:
+    """把用户输入解析为时长参数。
+
+    "30"    -> 30        固定 30 秒
+    "10,30" -> (10, 30)  每个练习在 10~30 秒之间随机
+    非法输入抛 ValueError，消息可直接展示给用户。
+    """
+    raw = str(text if text is not None else "").strip()
+    if not raw:
+        raise ValueError("请输入每个练习的时长，例如 30 或 10,30")
+    if "," in raw:
+        parts = [part.strip() for part in raw.split(",")]
+        if len(parts) != 2:
+            raise ValueError("范围格式为 最小值,最大值，例如 10,30")
+        try:
+            param: int | tuple[int, int] = (int(parts[0]), int(parts[1]))
+        except ValueError:
+            raise ValueError("范围必须是整数秒，例如 10,30") from None
+    else:
+        try:
+            param = int(raw)
+        except ValueError:
+            raise ValueError("时长必须是整数秒，例如 30 或 10,30") from None
+    return validate_duration_param(param)
+
+
 # ------------------------------------------------------------------- 模型
 
 
@@ -172,6 +228,11 @@ class TaskSnapshot:
     school_name: str = ""
     user_operation: str | None = None
     practice_mode: str = "required"
+    # 每个练习的时长参数原样回显："30"（固定秒）或 "10,30"（随机范围）
+    duration_param: str = ""
+    duration_targets: list[dict] = field(default_factory=list)
+    selected_duration_target: dict | None = None
+    selected_duration_targets: list[dict] = field(default_factory=list)
     courses: list[dict] = field(default_factory=list)
     warning: str | None = None
     error: str | None = None

@@ -28,6 +28,7 @@ class TaskManager:
         credentials: CredentialStore,
         allow_multi_question: bool = True,
         client_factory: Callable[[str], object] | None = None,
+        proxy: str | None = None,
     ) -> None:
         self.bus = bus
         self.log_store = log_store
@@ -35,6 +36,7 @@ class TaskManager:
         self.credentials = credentials
         self.allow_multi_question = allow_multi_question
         self.client_factory = client_factory or self._default_client_factory
+        self.proxy = proxy
 
         self._tasks: dict[str, Task] = {}
         self._lock = threading.RLock()
@@ -82,6 +84,7 @@ class TaskManager:
                 login_session=login_session,
                 on_login_session=session_saver,
                 allow_multi_question=self.allow_multi_question,
+                proxy=self.proxy,
             )
             self._tasks[task_id] = task
 
@@ -141,6 +144,14 @@ class TaskManager:
         self.bus.publish("task.updated", task.snapshot())
         return ok
 
+    def start_duration(self, task_id: str) -> bool:
+        task = self.get(task_id)
+        if task is None:
+            return False
+        ok = task.start_duration()
+        self.bus.publish("task.updated", task.snapshot())
+        return ok
+
     def start_catalog(self, task_id: str) -> bool:
         task = self.get(task_id)
         if task is None:
@@ -178,7 +189,15 @@ class TaskManager:
         if task.status is Status.INITIALIZING:
             return False
         mode = task.practice_mode
+        duration_param = task.duration_param
         task.request_stop()
+        worker = task._worker
+        if worker is not None and worker.is_alive():
+            worker.join(timeout=2)
+            if worker.is_alive():
+                return False
+        if mode == "duration":
+            return task.start_duration(duration_param=duration_param or None)
         return task.start(practice_mode=mode)
 
     def choose_course(self, task_id: str, course_id: int, resource_id: int) -> bool:
@@ -192,6 +211,18 @@ class TaskManager:
         if resource is None:
             raise ValueError("教程不存在")
         task.choose_course(course, resource)
+        return True
+
+    def choose_duration(
+        self,
+        task_id: str,
+        target_ids: str | list[str],
+        duration_param: int | tuple[int, int] | None = None,
+    ) -> bool:
+        task = self.get(task_id)
+        if task is None:
+            return False
+        task.choose_duration(target_ids, duration_param)
         return True
 
     def choose_practice(self, task_id: str, task_ids: list[str]) -> bool:

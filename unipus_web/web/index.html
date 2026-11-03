@@ -215,6 +215,62 @@
     </form>
   </dialog>
 
+  <!-- 刷题入口 -->
+  <dialog id="practice-dialog" class="dialog">
+    <form id="practice-form" class="dialog-form">
+      <header class="dialog-head">
+        <div><h2>刷题</h2><p class="dialog-subtitle">选择本次刷题范围</p></div>
+        <button type="button" class="icon-btn" data-close aria-label="关闭">×</button>
+      </header>
+      <div class="option-list" role="radiogroup" aria-label="刷题范围">
+        <label class="option">
+          <input class="option-radio" type="radio" name="practice-mode" value="required" checked>
+          <span class="option-content"><strong>老师布置的必修</strong><small>自动完成老师勾选的未完成必修内容。</small></span>
+          <span class="option-selected">已选</span>
+        </label>
+        <label class="option">
+          <input class="option-radio" type="radio" name="practice-mode" value="catalog">
+          <span class="option-content"><strong>全目录自选题目</strong><small>浏览完整目录，勾选未完成题目后开始。</small></span>
+          <span class="option-selected">已选</span>
+        </label>
+      </div>
+      <p id="practice-hint" class="hint">只有一门课程和教程时，将直接开始必修任务。</p>
+      <p id="practice-error" class="form-error" role="alert" hidden></p>
+      <footer class="dialog-foot">
+        <button type="button" class="btn btn-ghost" data-close>取消</button>
+        <button type="submit" class="btn btn-primary" id="practice-submit">开始必修任务</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <!-- 刷时长：选择计时内容并设置每个练习时长 -->
+  <dialog id="duration-target-dialog" class="dialog">
+    <form id="duration-target-form" class="dialog-form">
+      <header class="dialog-head">
+        <div><h2>选择计时内容与时长</h2><p class="dialog-subtitle">时长会累计到所选学习内容</p></div>
+        <button type="button" class="icon-btn" data-close aria-label="关闭">×</button>
+      </header>
+      <div class="selection-toolbar">
+        <span class="selection-hint" id="duration-target-count">0 个</span>
+        <span class="selection-hint">可多选，同时并行计时（总耗时≈单项最长时长）</span>
+      </div>
+      <div id="duration-target-options" class="option-list" role="group" aria-label="计时内容"></div>
+      <p id="duration-target-summary" class="selection-summary">请选择要累计时长的学习内容（可多选）</p>
+      <label class="field">
+        <span>每个练习时长（秒）</span>
+        <input id="duration-per-practice" type="text" inputmode="numeric" value="30" required
+               aria-describedby="duration-per-practice-hint" placeholder="30 或 10,30">
+      </label>
+      <p id="duration-per-practice-hint" class="hint">填 30 表示每个练习固定 30 秒；填 10,30 表示每个练习在 10~30 秒之间随机。暂停时会停止上报，恢复后继续累计。</p>
+      <p class="hint">学习时长以平台最终统计为准，可能延迟更新。请保持程序运行。</p>
+      <p id="duration-target-error" class="form-error" role="alert" hidden></p>
+      <footer class="dialog-foot">
+        <button type="button" class="btn btn-ghost" data-close>取消</button>
+        <button type="submit" class="btn btn-primary" id="duration-target-submit" disabled>开始并行计时</button>
+      </footer>
+    </form>
+  </dialog>
+
   <!-- 选择课程 -->
   <dialog id="course-dialog" class="dialog dialog-wide">
     <form id="course-form" class="dialog-form">
