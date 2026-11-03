@@ -144,11 +144,11 @@ class TaskManager:
         self.bus.publish("task.updated", task.snapshot())
         return ok
 
-    def start_duration(self, task_id: str, target_minutes: int) -> bool:
+    def start_duration(self, task_id: str) -> bool:
         task = self.get(task_id)
         if task is None:
             return False
-        ok = task.start_duration(target_minutes)
+        ok = task.start_duration()
         self.bus.publish("task.updated", task.snapshot())
         return ok
 
@@ -189,7 +189,7 @@ class TaskManager:
         if task.status is Status.INITIALIZING:
             return False
         mode = task.practice_mode
-        target_minutes = task.target_minutes
+        duration_param = task.duration_param
         task.request_stop()
         worker = task._worker
         if worker is not None and worker.is_alive():
@@ -197,7 +197,7 @@ class TaskManager:
             if worker.is_alive():
                 return False
         if mode == "duration":
-            return task.start_duration(target_minutes)
+            return task.start_duration(duration_param=duration_param or None)
         return task.start(practice_mode=mode)
 
     def choose_course(self, task_id: str, course_id: int, resource_id: int) -> bool:
@@ -213,11 +213,16 @@ class TaskManager:
         task.choose_course(course, resource)
         return True
 
-    def choose_duration(self, task_id: str, target_id: str) -> bool:
+    def choose_duration(
+        self,
+        task_id: str,
+        target_ids: str | list[str],
+        duration_param: int | tuple[int, int] | None = None,
+    ) -> bool:
         task = self.get(task_id)
         if task is None:
             return False
-        task.choose_duration(target_id)
+        task.choose_duration(target_ids, duration_param)
         return True
 
     def choose_practice(self, task_id: str, task_ids: list[str]) -> bool:

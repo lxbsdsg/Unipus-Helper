@@ -313,12 +313,12 @@ function taskChoices(task, onAction) {
   if (task.status === 'READY') {
     add('刷题', '完成老师布置的必修内容，或从完整目录中自选未完成题目。',
       '选择刷题范围', 'practice');
-    add('刷时长', '选择课程内容并设置目标时长，暂停时自动分段停止和恢复计时。',
-      '设置目标时长', 'duration');
+    add('刷时长', '先选课程，再选计时内容与每个练习时长（固定秒数或随机范围）。',
+      '选择课程', 'duration');
   } else if (task.user_operation === 'CHOOSE_PRACTICE') {
     add('选择要刷的题目', '按单元或小节勾选题目，查看已选数量后确认开始。', '打开题目选择', 'catalog');
   } else if (task.user_operation === 'CHOOSE_DURATION') {
-    add('选择计时内容', `${task.duration_targets?.length || 0} 个学习内容可累计时长。`, '打开内容选择', 'duration-target');
+    add('选择计时内容与时长', `${task.duration_targets?.length || 0} 个学习内容可累计时长。`, '打开内容选择', 'duration-target');
   } else {
     add('选择课程与教程', task.practice_mode === 'duration'
       ? '选择课程和教程后，继续选择计时内容。'
@@ -381,7 +381,7 @@ async function runTaskAction(taskId, action) {
     return;
   }
   if (action === 'duration') {
-    openDurationSetup(taskId);
+    startDuration(taskId);
     return;
   }
   if (action === 'duration-target') {
@@ -433,7 +433,13 @@ function renderManage(task) {
     ['用户', [task.user_name, task.school_name].filter(Boolean).join(' · ') || '—'],
     ['状态', (STATUS[task.status] || { label: task.status }).label],
     ['任务类型', task.practice_mode === 'duration' ? '刷时长' : '刷题'],
-    ['目标', task.practice_mode === 'duration' ? `${task.target_minutes || 0} 分钟` : '—'],
+    ['每项时长', task.practice_mode === 'duration'
+      ? (task.duration_param
+          ? (task.duration_param.includes(',')
+              ? `随机 ${task.duration_param} 秒`
+              : `${task.duration_param} 秒`)
+          : '—')
+      : '—'],
     ['进度', `${taskProgress(task)}（${task.progress_percent || 0}%）`],
     ['描述', task.description || '—'],
   ];
@@ -529,39 +535,19 @@ async function submitPracticeForm(event) {
   }
 }
 
-function openDurationSetup(taskId) {
+async function startDuration(taskId) {
+  // 先进入时长模式加载课程列表，随后按“选课程 → 选时长内容 → 设置时长”顺序进行
   state.durationTaskId = taskId;
-  const task = state.tasks.get(taskId);
-  $('#duration-minutes').value = task?.target_minutes || 30;
-  $('#duration-error').hidden = true;
-  $('#duration-dialog').showModal();
-}
-
-async function submitDurationForm(event) {
-  event.preventDefault();
-  const minutes = Number($('#duration-minutes').value);
-  const errorBox = $('#duration-error');
-  if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) {
-    errorBox.textContent = '请输入 1–1440 之间的整数分钟';
-    errorBox.hidden = false;
-    return;
-  }
-  const submit = $('#duration-submit');
-  errorBox.hidden = true;
-  submit.disabled = true;
   try {
     const result = await api(`/api/tasks/${encodeURIComponent(state.durationTaskId)}/duration`, {
       method: 'POST',
-      body: { target_minutes: minutes },
+      body: {},
     });
     if (result?.ok === false) throw new Error('任务当前无法开始刷时长');
-    $('#duration-dialog').close();
-    toast('正在读取课程内容，请稍后选择课程或计时内容', 'success');
+    toast('请先选择课程与教程', 'success');
+    openCourse(taskId);
   } catch (error) {
-    errorBox.textContent = error.message;
-    errorBox.hidden = false;
-  } finally {
-    submit.disabled = false;
+    toast(error.message, 'error');
   }
 }
 
@@ -569,52 +555,99 @@ function openDurationTarget(taskId) {
   const task = state.tasks.get(taskId);
   if (!task || !Array.isArray(task.duration_targets)) return;
   state.durationTargetTaskId = taskId;
-  state.durationTargetSelection = null;
+  state.durationTargetSelection = new Set();
   const box = $('#duration-target-options');
   box.textContent = '';
   $('#duration-target-count').textContent = `${task.duration_targets.length} 个`;
   $('#duration-target-error').hidden = true;
-  $('#duration-target-submit').disabled = true;
+  $('#duration-per-practice').value = task?.duration_param || '30';
+
   for (const target of task.duration_targets) {
-    const node = courseOption(
-      'duration-target',
+    const node = courseCheckbox(
       target.name || target.group_id,
       target.path || target.group_id,
       false,
-      () => {
-        state.durationTargetSelection = target;
-        $('#duration-target-summary').textContent = `已选：${target.name || target.group_id}`;
-        $('#duration-target-submit').disabled = false;
+      (checked) => {
+        if (checked) state.durationTargetSelection.add(target);
+        else state.durationTargetSelection.delete(target);
+        refreshDurationTargetForm();
       },
     );
     node.dataset.groupId = target.group_id;
     box.append(node);
   }
-  $('#duration-target-summary').textContent = '请选择要累计时长的学习内容';
+  refreshDurationTargetForm();
   $('#duration-target-dialog').showModal();
+}
+
+// 根据已勾选内容与时长输入刷新摘要、校验提示和提交按钮状态
+function refreshDurationTargetForm() {
+  const chosen = [...(state.durationTargetSelection || [])];
+  const param = durationParamValue();
+  $('#duration-target-summary').textContent = chosen.length
+    ? `已选 ${chosen.length} 项：${chosen.map((t) => t.name || t.group_id).join('、')}`
+    : '请选择要累计时长的学习内容（可多选，同时并行计时）';
+  $('#duration-target-submit').disabled = chosen.length === 0 || !param.valid;
+  const errorBox = $('#duration-target-error');
+  if (param.valid) {
+    errorBox.hidden = true;
+  } else if ($('#duration-per-practice').value.trim()) {
+    // 输入为空时不打扰用户，仅在已有输入但格式错误时提示
+    errorBox.textContent = param.error;
+    errorBox.hidden = false;
+  } else {
+    errorBox.hidden = true;
+  }
+  return { chosen, param };
 }
 
 async function submitDurationTargetForm(event) {
   event.preventDefault();
-  const target = state.durationTargetSelection;
-  if (!target) return;
+  const { chosen, param } = refreshDurationTargetForm();
+  if (chosen.length === 0 || !param.valid) return;
   const errorBox = $('#duration-target-error');
   const submit = $('#duration-target-submit');
-  errorBox.hidden = true;
   submit.disabled = true;
   try {
     await api(`/api/tasks/${encodeURIComponent(state.durationTargetTaskId)}/duration/choose`, {
       method: 'POST',
-      body: { target_id: target.group_id },
+      body: {
+        target_ids: chosen.map((target) => target.group_id),
+        duration: param.text,
+      },
     });
     $('#duration-target-dialog').close();
-    toast('已选择计时内容，开始累计学习时长', 'success');
+    toast(`已选择 ${chosen.length} 个内容，每项 ${param.text} 秒，开始并行累计学习时长`, 'success');
   } catch (error) {
     errorBox.textContent = error.message;
     errorBox.hidden = false;
   } finally {
-    submit.disabled = false;
+    refreshDurationTargetForm();
   }
+}
+
+// 解析每个练习的时长输入："30"（固定秒）或 "10,30"（随机范围）
+function durationParamValue() {
+  const raw = String($('#duration-per-practice').value || '').trim();
+  if (!raw) return { valid: false, error: '请输入每个练习的时长，例如 30 或 10,30' };
+  if (raw.includes(',')) {
+    const parts = raw.split(',').map((part) => part.trim());
+    if (parts.length !== 2) return { valid: false, error: '范围格式为 最小值,最大值，例如 10,30' };
+    const lo = Number(parts[0]);
+    const hi = Number(parts[1]);
+    if (!Number.isInteger(lo) || !Number.isInteger(hi)) {
+      return { valid: false, error: '范围必须是整数秒，例如 10,30' };
+    }
+    if (lo < 1 || hi < 1) return { valid: false, error: '时长至少为 1 秒' };
+    if (lo > hi) return { valid: false, error: '范围下限不能大于上限' };
+    if (hi > 86400) return { valid: false, error: '时长不能超过 86400 秒' };
+    return { valid: true, text: `${lo},${hi}` };
+  }
+  const value = Number(raw);
+  if (!Number.isInteger(value)) return { valid: false, error: '时长必须是整数秒，例如 30 或 10,30' };
+  if (value < 1) return { valid: false, error: '时长至少为 1 秒' };
+  if (value > 86400) return { valid: false, error: '时长不能超过 86400 秒' };
+  return { valid: true, text: String(value) };
 }
 
 /* ------------------------------------------------------------ 选择课程 */
@@ -666,7 +699,9 @@ function renderCourseOptions() {
     const node = courseOption('course', course.name || `课程 ${course.id}`,
       `${(course.resources || []).length} 个教程`, selection.course?.id === course.id, () => {
       selection.course = course;
-      selection.resource = null;
+      // 课程下只有一门教程时自动选中，省去多余点击
+      const resources = course.resources || [];
+      selection.resource = resources.length === 1 ? resources[0] : null;
       renderResourceOptions();
     });
     courseBox.append(node);
@@ -684,6 +719,19 @@ function courseOption(name, title, description, checked, onChange) {
   const content = el('span', 'option-content');
   content.append(el('strong', null, title), el('small', null, description));
   node.append(radio, content, el('span', 'option-selected', '已选'));
+  return node;
+}
+
+// 多选版旁白项：用于并行计时内容勾选，onChange 收到布尔值
+function courseCheckbox(title, description, checked, onChange) {
+  const node = el('label', 'option');
+  const box = el('input', 'option-radio');
+  box.type = 'checkbox';
+  box.checked = checked;
+  box.addEventListener('change', () => onChange(box.checked));
+  const content = el('span', 'option-content');
+  content.append(el('strong', null, title), el('small', null, description));
+  node.append(box, content, el('span', 'option-selected', '已选'));
   return node;
 }
 
@@ -1690,8 +1738,8 @@ function bindEvents() {
 
   $('#practice-form').addEventListener('submit', submitPracticeForm);
   $$('input[name="practice-mode"]').forEach((node) => node.addEventListener('change', updatePracticeHint));
-  $('#duration-form').addEventListener('submit', submitDurationForm);
   $('#duration-target-form').addEventListener('submit', submitDurationTargetForm);
+  $('#duration-per-practice').addEventListener('input', refreshDurationTargetForm);
   $('#catalog-form').addEventListener('submit', submitCatalogForm);
   $('#catalog-select-all').addEventListener('click', selectAllCatalog);
   $('#catalog-clear').addEventListener('click', () => {

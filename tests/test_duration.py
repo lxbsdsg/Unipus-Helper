@@ -4,6 +4,8 @@ import queue
 import threading
 import time
 
+import pytest
+
 from unipus_web.core.course_detail import CourseDetail
 from unipus_web.core.duration import (
     CourseDurationClient,
@@ -11,6 +13,7 @@ from unipus_web.core.duration import (
     build_duration_targets,
 )
 from unipus_web.core.task import Status, Task
+from unipus_web.models import parse_duration_param
 
 
 class FakeSocket:
@@ -271,7 +274,7 @@ def make_duration_task():
 def test_duration_task_runs_and_stops_socket():
     task = make_duration_task()
     task.initialize()
-    assert task.start_duration(1, target_seconds=1)
+    assert task.start_duration(duration_param=1)
 
     deadline = time.monotonic() + 5
     while task.status is not Status.COMPLETED and time.monotonic() < deadline:
@@ -293,11 +296,53 @@ def test_start_duration_rejects_invalid_target():
     task = make_duration_task()
     task.initialize()
     try:
-        task.start_duration(0)
+        task.start_duration(duration_param=0)
         raised = False
     except ValueError:
         raised = True
     assert raised
+
+
+def test_parse_duration_param_single_and_range():
+    assert parse_duration_param("30") == 30
+    assert parse_duration_param(" 10,30 ") == (10, 30)
+    for bad in ["", "abc", "10,5", "0", "-3", "10,20,30", "1,90000"]:
+        with pytest.raises(ValueError):
+            parse_duration_param(bad)
+
+
+def test_duration_task_random_range_gives_each_target_its_own_seconds(monkeypatch):
+    FakeDurationClient.instances = []
+    task = Task(
+        "duration-random",
+        "u",
+        "p",
+        client_factory=lambda task_id: TwoTargetCourseClient(),
+        on_change=lambda snapshot: None,
+        on_warning=lambda message: None,
+        on_error=lambda message: None,
+        duration_client_factory=FakeDurationClient,
+    )
+    task.initialize()
+    assert task.start_duration()
+    assert wait_for_status(task, Status.NEED_OPERATION)
+
+    # 固定随机结果，便于断言每个练习各自取到范围内时长
+    choices = iter([2, 3])
+    monkeypatch.setattr(
+        "unipus_web.core.task.random.randint",
+        lambda lo, hi: next(choices),
+    )
+    start = time.monotonic()
+    task.choose_duration(["group-1", "group-2"], duration_param=(2, 3))
+    assert wait_for_status(task, Status.COMPLETED, timeout=6)
+    elapsed = time.monotonic() - start
+    task._worker.join(timeout=2)
+
+    # 每个练习时长不同（2 秒 / 3 秒），总耗时≈最长的那一项
+    assert task.total == 3
+    assert elapsed < 3 + 2
+    assert task.snapshot()["duration_param"] == "2,3"
 
 
 class TwoTargetCourseClient(FakeCourseClient):
@@ -346,23 +391,59 @@ def test_duration_task_asks_for_and_accepts_target_choice():
         duration_client_factory=FakeDurationClient,
     )
     task.initialize()
-    assert task.start_duration(1, target_seconds=1)
+    assert task.start_duration()
     assert wait_for_status(task, Status.NEED_OPERATION)
     snapshot = task.snapshot()
     assert snapshot["duration_targets"][1]["group_id"] == "group-2"
 
-    task.choose_duration("group-2")
+    task.choose_duration("group-2", duration_param=1)
     assert wait_for_status(task, Status.COMPLETED)
     task._worker.join(timeout=2)
-    assert task.selected_duration_target.group_id == "group-2"
+    assert [item.group_id for item in task.selected_duration_targets] == ["group-2"]
     assert FakeDurationClient.instances[0].started[0][0].group_id == "group-2"
+    assert task.snapshot()["duration_param"] == "1"
+
+
+def test_duration_task_runs_multiple_targets_in_parallel():
+    FakeDurationClient.instances = []
+    task = Task(
+        "duration-parallel",
+        "u",
+        "p",
+        client_factory=lambda task_id: TwoTargetCourseClient(),
+        on_change=lambda snapshot: None,
+        on_warning=lambda message: None,
+        on_error=lambda message: None,
+        duration_client_factory=FakeDurationClient,
+    )
+    task.initialize()
+    assert task.start_duration()
+    assert wait_for_status(task, Status.NEED_OPERATION)
+
+    start = time.monotonic()
+    task.choose_duration(["group-1", "group-2"], duration_param=2)
+    assert wait_for_status(task, Status.COMPLETED, timeout=5)
+    elapsed = time.monotonic() - start
+    task._worker.join(timeout=2)
+
+    # 两个目标各自一条连接并发计时，总耗时≈单项时长而非相加
+    assert len(FakeDurationClient.instances) == 2
+    started = {client.started[0][0].group_id for client in FakeDurationClient.instances}
+    assert started == {"group-1", "group-2"}
+    assert all(client.stopped == 1 and client.closed for client in FakeDurationClient.instances)
+    assert elapsed < 2 * 2 - 0.5
+    snapshot = task.snapshot()
+    assert {item["group_id"] for item in snapshot["selected_duration_targets"]} == {
+        "group-1",
+        "group-2",
+    }
 
 
 def test_pause_stops_timer_and_resume_starts_new_segment():
     FakeDurationClient.instances = []
     task = make_duration_task()
     task.initialize()
-    assert task.start_duration(1, target_seconds=3)
+    assert task.start_duration(duration_param=3)
 
     deadline = time.monotonic() + 3
     while (
@@ -388,7 +469,7 @@ def test_duration_task_fails_promptly_when_socket_becomes_unhealthy():
     FakeDurationClient.instances = []
     task = make_duration_task()
     task.initialize()
-    assert task.start_duration(30, target_seconds=1800)
+    assert task.start_duration(duration_param=1800)
 
     deadline = time.monotonic() + 3
     while (

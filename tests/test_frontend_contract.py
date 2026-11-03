@@ -17,8 +17,8 @@ def test_required_elements_and_endpoints_exist():
         "log-list",
         "network-list",
         "practice-dialog",
-        "duration-dialog",
         "duration-target-dialog",
+        "duration-per-practice",
         "catalog-dialog",
         "catalog-tree",
         "catalog-select-all",
@@ -53,8 +53,14 @@ def test_required_elements_and_endpoints_exist():
     assert "leaf.selectable" in js
     # 刷题两个范围共用一个入口，时长任务使用独立入口
     assert "function openPracticeSetup" in js
-    assert "function openDurationSetup" in js
+    assert "function startDuration" in js
     assert "formatDuration" in js
+    # 时长内容支持并行多选
+    assert "function courseCheckbox" in js
+    assert "target_ids" in js
+    # 时长支持固定秒数与随机范围两种输入，校验/摘要走同一处刷新
+    assert "function durationParamValue" in js
+    assert "function refreshDurationTargetForm" in js
 
 
 def test_no_inline_external_scripts():

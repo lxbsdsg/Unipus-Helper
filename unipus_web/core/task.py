@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+import random
 import threading
 import time
 from enum import Enum
@@ -27,6 +28,7 @@ from ..models import (
     User,
     as_str,
     lenient_obj,
+    validate_duration_param,
 )
 
 logger = logging.getLogger(__name__)
@@ -113,10 +115,11 @@ class Task:
 
         # 任务方式：required = 必修，catalog = 全目录自选，duration = 学习时长
         self.practice_mode = "required"
-        self.target_minutes = 0
-        self._duration_target_seconds = 0
+        # 每个练习的时长参数：int=固定秒数；tuple=(最小值, 最大值) 随机
+        self.duration_param: int | tuple[int, int] = 0
         self.duration_targets: list[DurationTarget] = []
-        self.selected_duration_target: DurationTarget | None = None
+        # 并行计时：可同时挂多个目标，各自独立连接，总耗时≈单项最长时长
+        self.selected_duration_targets: list[DurationTarget] = []
         self.catalog: dict | None = None
         self.selected_task_ids: list[str] = []
 
@@ -193,7 +196,9 @@ class Task:
             self.catalog = None
             self.selected_task_ids = []
             self.duration_targets = []
-            self.selected_duration_target = None
+            self.selected_duration_targets = []
+            if practice_mode != "duration":
+                self.duration_param = 0
             self._generation += 1
             generation = self._generation
             self._stop_event.clear()
@@ -218,21 +223,27 @@ class Task:
         return self.start(practice_mode="catalog")
 
     def start_duration(
-        self, target_minutes: int, *, target_seconds: int | None = None
+        self, *, duration_param: int | tuple[int, int] | None = None
     ) -> bool:
-        """以学习时长方式开始；测试可注入短时钟目标。"""
-        if not 1 <= target_minutes <= 1440:
-            raise ValueError("目标时长必须在 1-1440 分钟之间")
-        if target_seconds is not None and target_seconds < 1:
-            raise ValueError("内部计时目标必须大于 0")
+        """以学习时长方式开始。
+
+        duration_param 可在启动时给定（固定秒数或 (下限, 上限) 随机范围），
+        也可以留空，在选定计时内容时通过 choose_duration 提供。
+        """
+        if duration_param is not None:
+            validate_duration_param(duration_param)
         with self._cond:
             if self.status is not Status.READY:
                 return False
-            self.target_minutes = target_minutes
-            self._duration_target_seconds = (
-                target_seconds if target_seconds is not None else target_minutes * 60
-            )
+            self.duration_param = duration_param if duration_param is not None else 0
         return self.start(practice_mode="duration")
+
+    @staticmethod
+    def _generate_learning_time(param: int | tuple[int, int]) -> int:
+        """固定秒数直接返回；(下限, 上限) 则在区间内随机取一个整数秒。"""
+        if isinstance(param, tuple):
+            return random.randint(param[0], param[1])
+        return int(param)
 
     def _run(self, generation: int) -> None:
         self._tls.generation = generation
@@ -365,9 +376,9 @@ class Task:
                 raise TaskStopped()
             self.duration_targets = targets
             if len(targets) == 1:
-                self.selected_duration_target = targets[0]
+                self.selected_duration_targets = [targets[0]]
             else:
-                self.selected_duration_target = None
+                self.selected_duration_targets = []
 
         if len(targets) > 1:
             self._begin_user_operation(
@@ -377,12 +388,27 @@ class Task:
             if self._stop_event.is_set() or self._is_stale(generation):
                 raise TaskStopped()
 
-        target = self.selected_duration_target
-        if target is None:
+        targets = list(self.selected_duration_targets)
+        if not targets:
             raise UnipusError("未选择计时内容")
-        return self._learn_duration(generation, context, target)
+        if not self.duration_param:
+            raise UnipusError("未设置每个练习的学习时长")
+        return self._learn_duration(generation, context, targets, self.duration_param)
 
-    def _learn_duration(self, generation: int, context, target: DurationTarget):
+    def _learn_duration(
+        self,
+        generation: int,
+        context,
+        targets: list[DurationTarget],
+        duration_param: int | tuple[int, int],
+    ):
+        """并行累计多个学习内容的时长。
+
+        每个目标各自建立一条计时连接并独立计时，多条连接在时间线上重叠，
+        因此总耗时约等于最长单项时长，而不是各项相加。duration_param 为
+        固定秒数或 (下限, 上限) 随机范围时，每个练习各自取一个时长，更
+        像真人学习。任意一条连接中断即整体失败。
+        """
         user = self.user
         if user is None or not user.open_id:
             raise UnipusError("尚未登录，无法开始学习时长任务。")
@@ -390,90 +416,140 @@ class Task:
         factory = self._duration_client_factory or (
             lambda: CourseDurationClient(user.open_id, proxy=self.proxy)
         )
-        duration_client = factory()
         self.checkpoint()
-        target_seconds = self._duration_target_seconds
-        completed = 0
-        segment_start: float | None = None
+        # 每个练习分配一个时长（固定或范围内随机）
+        per_target_seconds = [
+            self._generate_learning_time(duration_param) for _ in targets
+        ]
+        max_seconds = max(per_target_seconds)
+        label = targets[0].name if len(targets) == 1 else f"{len(targets)} 个学习内容"
+
+        # 每个目标一个工作者线程；进度取所有目标已累计秒数的最大值，等最长的那条
+        # 结束才到 100%，避免某条先结束让进度条提前满格。
+        state_lock = threading.Lock()
+        elapsed = [0.0] * len(targets)
+        failure: Exception | None = None
+
+        def publish(description: str) -> None:
+            with state_lock:
+                done = max(elapsed)
+            self._update(
+                gen=generation,
+                completed=min(int(done), max_seconds),
+                total=max_seconds,
+                description=description,
+            )
+
+        def run_target(index: int) -> None:
+            nonlocal failure
+            target = targets[index]
+            target_seconds = per_target_seconds[index]
+            client = factory()
+            completed = 0
+            segment_start: float | None = None
+            try:
+                client.connect()
+                client.start(target, context.course_instance_id, context.resource_id)
+                segment_start = time.monotonic()
+                last_publish = time.monotonic()
+                while True:
+                    with self._cond:
+                        if self._stop_event.is_set() or self._is_stale(generation):
+                            raise TaskStopped()
+                        paused = self.status is Status.PAUSED
+                    now = time.monotonic()
+
+                    if paused:
+                        if segment_start is not None:
+                            completed += max(0, now - segment_start)
+                            segment_start = None
+                            client.stop()
+                        with self._cond:
+                            while self.status is Status.PAUSED:
+                                if self._stop_event.is_set() or self._is_stale(
+                                    generation
+                                ):
+                                    raise TaskStopped()
+                                self._cond.wait(0.2)
+                        client.start(
+                            target, context.course_instance_id, context.resource_id
+                        )
+                        segment_start = time.monotonic()
+                        continue
+
+                    if not client.healthy:
+                        raise NetworkError("计时连接中断，任务已停止")
+
+                    if segment_start is not None:
+                        current = completed + max(0, now - segment_start)
+                        with state_lock:
+                            elapsed[index] = current
+                        if now - last_publish >= 1:
+                            publish(f"正在累计学习时长：{label}")
+                            last_publish = now
+                        if current >= target_seconds:
+                            client.stop()
+                            completed = target_seconds
+                            segment_start = None
+                            break
+
+                    time.sleep(0.05)
+            except TaskStopped:
+                raise
+            except Exception as exc:  # 任一目标失败即整体失败
+                with state_lock:
+                    if failure is None:
+                        failure = exc
+            finally:
+                if segment_start is not None:
+                    try:
+                        client.stop()
+                    except Exception:
+                        logger.warning(
+                            "Task %s failed to send final duration stop.",
+                            self.task_id,
+                        )
+                try:
+                    client.close()
+                except Exception:
+                    logger.debug(
+                        "Task %s duration socket cleanup failed.", self.task_id
+                    )
+                with state_lock:
+                    elapsed[index] = completed
+
         self._update(
             gen=generation,
             completed=0,
-            total=target_seconds,
-            description=f"正在累计学习时长：{target.name}",
+            total=max_seconds,
+            description=f"正在累计学习时长：{label}",
         )
 
-        try:
-            duration_client.connect()
-            duration_client.start(target, context.course_instance_id, context.resource_id)
-            segment_start = time.monotonic()
-            next_update = time.monotonic() + 1
-
-            while True:
-                with self._cond:
-                    if self._stop_event.is_set() or self._is_stale(generation):
-                        raise TaskStopped()
-                    paused = self.status is Status.PAUSED
-                now = time.monotonic()
-
-                if paused:
-                    if segment_start is not None:
-                        completed += max(0, int(now - segment_start))
-                        segment_start = None
-                        duration_client.stop()
-                        self._update(
-                            gen=generation,
-                            completed=min(completed, target_seconds),
-                            description="计时已暂停，等待恢复",
-                        )
-                    with self._cond:
-                        while self.status is Status.PAUSED:
-                            if self._stop_event.is_set() or self._is_stale(generation):
-                                raise TaskStopped()
-                            self._cond.wait(0.2)
-                    duration_client.start(
-                        target, context.course_instance_id, context.resource_id
-                    )
-                    segment_start = time.monotonic()
-                    next_update = segment_start + 1
-                    continue
-
-                if not duration_client.healthy:
-                    raise NetworkError("计时连接中断，任务已停止")
-
-                if segment_start is not None:
-                    elapsed = completed + max(0, now - segment_start)
-                    if now >= next_update:
-                        self._update(
-                            gen=generation,
-                            completed=min(int(elapsed), target_seconds),
-                            description=f"正在累计学习时长：{target.name}",
-                        )
-                        next_update = now + 1
-                    if elapsed >= target_seconds:
-                        duration_client.stop()
-                        completed = target_seconds
-                        segment_start = None
-                        break
-
-                time.sleep(0.05)
-        finally:
-            if segment_start is not None:
-                try:
-                    duration_client.stop()
-                except Exception:
-                    logger.warning("Task %s failed to send final duration stop.", self.task_id)
-            try:
-                duration_client.close()
-            except Exception:
-                logger.debug("Task %s duration socket cleanup failed.", self.task_id)
+        workers = []
+        for index in range(len(targets)):
+            worker = threading.Thread(
+                target=run_target,
+                args=(index,),
+                name=f"duration-{targets[index].group_id}",
+                daemon=True,
+            )
+            workers.append(worker)
+            worker.start()
+        # 主工作线程阻塞等待所有计时线程结束；停止/暂停由各线程自行检查
+        for worker in workers:
+            worker.join()
 
         if self._stop_event.is_set() or self._is_stale(generation):
             raise TaskStopped()
+        if failure is not None:
+            if isinstance(failure, (AuthError, NetworkError, UnipusError)):
+                raise failure
+            raise NetworkError(f"计时任务失败：{failure}")
         self._update(
             gen=generation,
-            completed=target_seconds,
-            total=target_seconds,
-            description=f"学习时长已完成：{target.name}",
+            completed=max_seconds,
+            total=max_seconds,
+            description=f"学习时长已完成：{label}",
         )
         from .learn import LearnSummary
 
@@ -552,15 +628,29 @@ class Task:
             self._cond.notify_all()
         self._emit_change()
 
-    def choose_duration(self, target_id: str) -> None:
-        target = next(
-            (item for item in self.duration_targets if item.group_id == target_id),
-            None,
-        )
-        if target is None:
-            raise ValueError("计时内容不存在")
+    def choose_duration(
+        self,
+        target_ids: str | list[str],
+        duration_param: int | tuple[int, int] | None = None,
+    ) -> None:
+        """选定计时内容；可同时指定每个练习的时长（固定秒数或随机范围）。"""
+        wanted = [target_ids] if isinstance(target_ids, str) else list(target_ids)
+        wanted = [str(item) for item in wanted if str(item)]
+        if not wanted:
+            raise ValueError("必须选择计时内容")
+        by_id = {item.group_id: item for item in self.duration_targets}
+        targets: list[DurationTarget] = []
+        for target_id in dict.fromkeys(wanted):   # 去重且保持顺序
+            target = by_id.get(target_id)
+            if target is None:
+                raise ValueError("计时内容不存在")
+            targets.append(target)
+        if duration_param is not None:
+            duration_param = validate_duration_param(duration_param)
         with self._cond:
-            self.selected_duration_target = target
+            self.selected_duration_targets = targets
+            if duration_param is not None:
+                self.duration_param = duration_param
             self._user_op_done = True
             self.user_operation = None
             if self.status is Status.NEED_OPERATION:
@@ -783,18 +873,29 @@ class Task:
                     self.user_operation.value if self.user_operation else None
                 ),
                 practice_mode=self.practice_mode,
-                target_minutes=self.target_minutes,
+                duration_param=self._duration_param_text(),
                 duration_targets=[item.to_dict() for item in self.duration_targets],
                 selected_duration_target=(
-                    self.selected_duration_target.to_dict()
-                    if self.selected_duration_target
+                    self.selected_duration_targets[0].to_dict()
+                    if self.selected_duration_targets
                     else None
                 ),
+                selected_duration_targets=[
+                    item.to_dict() for item in self.selected_duration_targets
+                ],
                 courses=[course.to_dict() for course in self.course_list],
                 warning=self.warning,
                 error=self.error,
             )
             return snapshot.to_dict()
+
+    def _duration_param_text(self) -> str:
+        param = self.duration_param
+        if isinstance(param, tuple):
+            return f"{param[0]},{param[1]}"
+        if isinstance(param, int) and param > 0:
+            return str(param)
+        return ""
 
     def _emit_change(self) -> None:
         try:
