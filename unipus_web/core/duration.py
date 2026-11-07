@@ -31,11 +31,15 @@ class DurationTarget:
     route_path: str
     name: str
     path: str
+    unit_name: str = ""
+    unit_index: int = -1
 
     def to_dict(self) -> dict:
         return {
             "group_id": self.group_id,
             "unit_id": self.unit_id,
+            "unit_name": self.unit_name,
+            "unit_index": self.unit_index,
             "micro_id": self.micro_id,
             "route_path": self.route_path,
             "name": self.name,
@@ -52,7 +56,7 @@ def build_duration_targets(course: CourseDetail) -> list[DurationTarget]:
     targets: list[DurationTarget] = []
     seen_groups: set[str] = set()
 
-    def walk(node, ancestors: list[str], labels: list[str]) -> None:
+    def walk(node, ancestors: list[str], labels: list[str], unit_name: str, unit_index: int) -> None:
         if not node.children:
             if not node.id or not ancestors:
                 return
@@ -72,6 +76,8 @@ def build_duration_targets(course: CourseDetail) -> list[DurationTarget]:
                 DurationTarget(
                     group_id=group_id,
                     unit_id=unit_id,
+                    unit_name=unit_name,
+                    unit_index=unit_index,
                     micro_id=micro_id,
                     route_path="/".join(route_ids),
                     name=node.name or group_id,
@@ -80,11 +86,12 @@ def build_duration_targets(course: CourseDetail) -> list[DurationTarget]:
             )
             return
         for child in node.children:
-            walk(child, ancestors + [node.id], labels + [node.name or node.id])
+            walk(child, ancestors + [node.id], labels + [node.name or node.id], unit_name, unit_index)
 
-    for unit in course.units:
+    for index, unit in enumerate(course.units):
+        label = unit.caption or unit.name or unit.id or f"单元 {index + 1}"
         for child in unit.children:
-            walk(child, [unit.id], [unit.name or unit.id])
+            walk(child, [unit.id], [label], label, index)
 
     return targets
 

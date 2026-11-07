@@ -16,9 +16,18 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+
+class NoCacheStaticFiles(StaticFiles):
+    """静态资源禁用强缓存，避免改动 app.js/style.css 后仍需 Ctrl+F5。"""
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
 
 from .api.client import UnipusClient
 from .api.errors import ApiError, AuthError, NetworkError, UnipusError
@@ -85,6 +94,9 @@ def create_app(
     proxy: str | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Unipus Helper", version=VERSION)
+    # 每次进程启动生成新的资源令牌，重启后浏览器必然拉取新的 app.js/style.css，
+    # 不必手动 Ctrl+F5。
+    asset_token = f"{VERSION}-{int(time.time())}"
 
     log_store = LogStore()
     bus = EventBus()
@@ -137,9 +149,13 @@ def create_app(
 
     @app.get("/", include_in_schema=False)
     def index():
-        return FileResponse(WEB_DIR / "index.html")
+        html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
+        # 静态资源带上版本号，发版后浏览器会自动获取新文件。
+        html = html.replace("/static/app.js", f"/static/app.js?v={asset_token}")
+        html = html.replace("/static/style.css", f"/static/style.css?v={asset_token}")
+        return HTMLResponse(html, headers={"Cache-Control": "no-cache, must-revalidate"})
 
-    app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+    app.mount("/static", NoCacheStaticFiles(directory=WEB_DIR), name="static")
 
     # ------------------------------------------------------------ 任务
 

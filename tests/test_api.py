@@ -167,18 +167,30 @@ def test_duration_target_validation():
     client = make_client()
     created = client.post("/api/tasks", json={"username": "u", "password": "p"})
     task_id = created.json()["id"]
-    # /duration 只负责进入时长模式（课程/内容/时长随后选择），不再校验时长
-    assert client.post(f"/api/tasks/{task_id}/duration", json={}).status_code == 202
-    # 任务未进入“选择计时内容”状态时，选择接口一律 409
+    task = client.app.state.manager._wait_ready(task_id)
+    assert task is not None
+    # READY 状态（未进入选择计时内容）时，选择接口一律 409
     assert client.post(
         f"/api/tasks/{task_id}/duration/choose",
         json={"target_id": " ", "duration": "30"},
     ).status_code == 409
-    # 兼容新字段：空列表同样被拒绝
     assert client.post(
         f"/api/tasks/{task_id}/duration/choose",
         json={"target_ids": [" ", ""], "duration": "30"},
     ).status_code == 409
+    # /duration 只负责进入时长模式（课程/内容/时长随后选择），不再校验时长
+    assert client.post(f"/api/tasks/{task_id}/duration", json={}).status_code == 202
+    # 即使只有 1 个计时内容，也必须进入选择界面让用户设置时长
+    deadline = time.time() + 3
+    while time.time() < deadline and task.status.value != "NEED_OPERATION":
+        time.sleep(0.02)
+    assert task.status.value == "NEED_OPERATION"
+    assert task.user_operation.value == "CHOOSE_DURATION"
+    # 空目标在 CHOOSE_DURATION 状态下返回 400
+    assert client.post(
+        f"/api/tasks/{task_id}/duration/choose",
+        json={"target_ids": [" "], "duration": "30"},
+    ).status_code == 400
 
 
 def test_duration_choose_validates_targets_and_duration():

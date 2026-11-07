@@ -49,7 +49,12 @@ const state = {
   durationTaskId: null,
   durationTargetTaskId: null,
   durationTargetSelection: null,
-  courseSelection: { course: null, resource: null, courses: [] },
+  durationTargetUnitSelection: null,
+  durationTargetExpanded: null,
+  courseSelection: { course: null, resource: null, courses: [], loaded: false },
+  courseLoading: false,
+  courseRequestId: 0,
+  durationCoursePoll: 0,
   catalogTaskId: null,
   catalogRequestId: 0,
   catalog: null,
@@ -65,9 +70,24 @@ const state = {
   courseQuery: '',
   taskQuery: '',
   activeTaskId: null,
+  stageTaskId: null,
+  stageView: 'empty',
+  courseSubmitting: false,
+  catalogSubmitting: false,
+  durationGoingBack: false,
+  scrollStageOnNextForm: false,
   ws: null,
   reconnectDelay: 1000,
-};
+};// 运行参数保持产品默认值；E2E 通过 window.UNIPUS_UI_TIMING 缩短轮询时间。
+const UI_TIMING = Object.assign(
+  {
+    durationCoursePollIntervalMs: 1000,
+    durationCoursePollAttempts: 60,
+  },
+  window.UNIPUS_UI_TIMING || {},
+);
+
+
 
 /* ------------------------------------------------------------ 基础工具 */
 
@@ -197,15 +217,348 @@ function renderTasks() {
     const node = $(id);
     if (node) node.textContent = String(value);
   };
-  taskValue('#summary-total', allTasks.length);
-  taskValue('#summary-running', running);
-  taskValue('#summary-attention', attention);
-  taskValue('#summary-completed', completed);
   taskValue('#context-task-count', allTasks.length);
   $('#task-summary').textContent = hasTasks
     ? `${allTasks.length} 个任务 · ${running} 个运行中`
     : '0 个任务';
+  renderStage();
   renderContext(allTasks);
+}
+
+function taskMode(task) {
+  if (!task) return null;
+  if (task.status === 'READY') return 'choose';
+  return task.practice_mode === 'duration' ? 'duration' : 'practice';
+}
+
+function taskStatusLabel(task) {
+  return (STATUS[task.status] || { label: task.status || '未知' }).label;
+}
+
+function taskProgressText(task) {
+  if (!task) return '0 / 0';
+  return task.practice_mode === 'duration'
+    ? `${progressValue(task, task.completed)} / ${progressValue(task, task.total)}`
+    : `${task.completed || 0} / ${task.total || 0}`;
+}
+
+function setStage(taskId, view) {
+  state.stageTaskId = taskId || null;
+  if (taskId) state.activeTaskId = taskId;
+  const task = taskId ? state.tasks.get(taskId) : null;
+  state.stageView = view || (task ? taskMode(task) : 'empty');
+  renderStage();
+}
+
+// 进入某个设置步骤：挂载表单并让左侧模式/步骤栏保持同步（不重绘中间工作区）。
+function enterStage(taskId, view, formId, host = null, options = {}) {
+  state.stageTaskId = taskId;
+  state.activeTaskId = taskId;
+  state.stageView = view;
+  const form = mountStageForm(formId, host, options);
+  const task = taskId ? state.tasks.get(taskId) : null;
+  if (task) {
+    $('#stage-kicker').textContent = '当前进度';
+    $('#stage-title').textContent = task.name || task.username || task.id;
+    $('#stage-subtitle').textContent = [task.user_name, task.school_name, task.id]
+      .filter(Boolean)
+      .join(' · ');
+    renderStageActions(task);
+    renderStageProgress(task);
+    renderRailModes(task);
+  }
+  return form;
+}
+
+function stageViewForTask(task) {
+  if (!task) return 'empty';
+  if (task.status === 'READY') {
+    return state.stageView === 'practice' || state.stageView === 'duration'
+      ? state.stageView
+      : 'modes';
+  }
+  if (task.status === 'NEED_OPERATION') {
+    if (task.user_operation === 'CHOOSE_PRACTICE') return 'catalog';
+    if (task.user_operation === 'CHOOSE_DURATION') return 'duration-target';
+    return 'course';
+  }
+  return task.practice_mode === 'duration' ? 'running-duration' : 'running-practice';
+}
+
+function stageTask() {
+  return state.stageTaskId ? state.tasks.get(state.stageTaskId) || null : null;
+}
+
+function renderStage() {
+  const task = stageTask();
+  const content = $('#stage-content');
+  const empty = $('#workbench-empty');
+  if (!task) {
+    content.hidden = true;
+    empty.hidden = false;
+    const modeOptions = $('#mode-options');
+    if (modeOptions) modeOptions.textContent = '';
+    return;
+  }
+  content.hidden = false;
+  empty.hidden = true;
+  // 先按任务状态归一化步骤，再渲染左侧栏，避免读到上一次流程的 stageView。
+  state.stageView = stageViewForTask(task);
+  renderRailModes(task);
+  $('#stage-kicker').textContent = task.status === 'READY' ? '选择模式' : '当前进度';
+  $('#stage-title').textContent = task.name || task.username || task.id;
+  $('#stage-subtitle').textContent = [task.user_name, task.school_name, task.id]
+    .filter(Boolean)
+    .join(' · ');
+  renderStageActions(task);
+  renderStageProgress(task);
+  renderStageBody(task);
+}
+
+// 左侧栏：待开始任务给出模式入口，进行中的任务展示当前处于哪一步。
+function renderRailModes(task) {
+  const modeOptions = $('#mode-options');
+  if (!modeOptions) return;
+  modeOptions.textContent = '';
+  // 用户已显式选择模式后，左侧改为展示该模式的流程步骤，不再重复弹出模式按钮。
+  const chosenMode = state.stageView === 'practice' || state.stageView === 'duration'
+    || state.stageView === 'catalog' || state.stageView === 'course'
+    || state.stageView === 'duration-target';
+  if (task.status === 'READY' && !chosenMode) {
+    renderModePicker(task, modeOptions);
+    return;
+  }
+  // 任务已记录 practice_mode 时以它为准；仅用户刚点选、尚未落库时才用 stageView。
+  const mode = task.practice_mode === 'duration' || state.stageView === 'duration'
+    ? 'duration'
+    : task.practice_mode === 'catalog' || state.stageView === 'catalog'
+      ? 'catalog'
+      : 'practice';
+  const steps = mode === 'duration'
+    ? ['选择课程与教程', '选择计时内容', '设置每项时长', '后台累计时长']
+    : mode === 'catalog'
+      ? ['选择刷题范围', '选择课程与教程', '勾选练习题目', '后台完成题目']
+      : ['选择刷题范围', '选择课程与教程', '后台完成必修'];
+  const currentStep =
+    task.status === 'READY'
+      ? 0
+      : task.status === 'NEED_OPERATION'
+      ? task.user_operation === 'CHOOSE_PRACTICE' ? 2 : 1
+      : task.status === 'RUNNING'
+        ? mode === 'duration'
+          // 读取目录时仍停在“选择计时内容”，避免进度条跳到已完成的最后一步。
+          ? ((task.selected_duration_targets || []).length ? steps.length - 1 : 1)
+          : steps.length - 1
+        : steps.length - 1;
+  for (const [index, label] of steps.entries()) {
+    const node = el('div', 'rail-step', label);
+    node.classList.toggle('is-active', index === currentStep);
+    node.classList.toggle('is-done', index < currentStep);
+    modeOptions.append(node);
+  }
+}
+
+function renderStageActions(task) {
+  const box = $('#stage-actions');
+  box.textContent = '';
+  if (task.status === 'NEED_OPERATION' && task.user_operation === 'CHOOSE_DURATION') {
+    const back = button('返回课程', 'btn btn-ghost btn-sm', () => backToCourseSelection(task.id));
+    back.dataset.action = 'back-course';
+    back.dataset.id = task.id;
+    box.append(back);
+  }
+  const add = (label, action, className = 'btn btn-ghost btn-sm') => {
+    const node = button(label, className, () => runTaskAction(task.id, action));
+    node.dataset.action = action;
+    node.dataset.id = task.id;
+    box.append(node);
+  };
+  if (task.status === 'RUNNING' || task.status === 'WAITING') {
+    add('暂停', 'pause');
+    add('停止', 'stop');
+  } else if (task.status === 'PAUSED') {
+    add('恢复', 'resume', 'btn btn-primary btn-sm');
+    add('停止', 'stop');
+  } else if (task.status === 'ERROR' || task.status === 'COMPLETED') {
+    add('重试', 'restart', 'btn btn-primary btn-sm');
+  } else if (task.status === 'NEED_OPERATION') {
+    add('暂停', 'pause');
+  }
+  if (task.status === 'READY' && state.stageView === 'practice') {
+    const back = button('重选模式', 'btn btn-ghost btn-sm', () => setStage(task.id, 'modes'));
+    back.dataset.action = 'remode';
+    back.dataset.id = task.id;
+    box.append(back);
+  }
+  add('管理', 'manage', 'btn-link');
+}
+
+function renderStageProgress(task) {
+  const box = $('#stage-progress');
+  box.textContent = '';
+  const percent = Math.max(0, Math.min(100, task.progress_percent || 0));
+  const tone = ['RUNNING', 'WAITING', 'NEED_OPERATION'].includes(task.status)
+    ? 'running'
+    : task.status === 'ERROR'
+      ? 'error'
+      : task.status === 'COMPLETED'
+        ? 'done'
+        : 'idle';
+
+  const summary = el('div', 'stage-progress-summary');
+  const metric = el('div', 'stage-metric');
+  metric.append(el('span', 'stage-metric-label', task.practice_mode === 'duration' ? '学习时长' : '题目进度'));
+  metric.append(el('strong', null, taskProgressText(task)));
+  metric.append(el('span', 'stage-metric-note',
+    task.practice_mode === 'duration'
+      ? `每项 ${task.duration_param || '—'} 秒`
+      : (task.description || '等待任务更新')));
+  summary.append(metric);
+
+  const status = el('div', 'stage-status');
+  status.dataset.tone = tone;
+  status.append(el('span', 'stage-status-dot'), el('strong', null, taskStatusLabel(task)));
+  status.append(el('span', null, task.description || ''));
+  summary.append(status);
+  box.append(summary);
+
+  const ruler = el('div', 'ruler stage-ruler');
+  ruler.setAttribute('role', 'progressbar');
+  ruler.setAttribute('aria-valuemin', '0');
+  ruler.setAttribute('aria-valuemax', '100');
+  ruler.setAttribute('aria-valuenow', String(percent));
+  const fill = el('span', 'ruler-fill');
+  fill.style.width = `${percent}%`;
+  ruler.append(fill);
+  const numbers = el('div', 'progress-numbers stage-progress-numbers');
+  numbers.append(el('strong', null, `${percent}%`));
+  numbers.append(el('span', null, task.practice_mode === 'duration' ? '已累计时长' : '完成题数'));
+  numbers.append(el('span', 'pct', task.practice_mode === 'duration'
+    ? `目标 ${progressValue(task, task.total)}`
+    : `共 ${task.total || 0} 题`));
+  box.append(ruler, numbers);
+}
+
+function renderStageBody(task) {
+  const body = $('#stage-body');
+  const nextView = stageViewForTask(task);
+  // 同一任务的同一设置步骤只重绘进度，不重建表单，避免实时更新清空用户正在做的选择。
+  const courseListPending = nextView === 'course'
+    && state.courseTaskId === task.id
+    && !state.courseSelection.loaded
+    && !state.courseLoading;
+  if (
+    state.stageView === nextView &&
+    body.dataset.view === nextView &&
+    body.dataset.taskId === task.id &&
+    body.firstElementChild &&
+    !courseListPending
+  ) {
+    return;
+  }
+  state.stageView = nextView;
+  body.dataset.view = nextView;
+  body.dataset.taskId = task.id;
+  recycleStageForms(body);
+  body.textContent = '';
+  // 手机端：切换到表单步骤时自动滚到工作台（空状态/运行态不滚动）
+  const isFormView = ['practice', 'course', 'duration-target', 'catalog'].includes(nextView);
+  if (isFormView && window.matchMedia('(max-width: 820px)').matches) {
+    requestAnimationFrame(() => $('.stage')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  }
+  // 表单模板常驻在 #stage-templates，这里只做挂载；加载态交给具体步骤渲染。
+  const openForm = (id, loader) => {
+    mountStageForm(id, body);
+    if (loader) loader();
+  };
+  if (task.status === 'NEED_OPERATION') {
+    if (nextView === 'catalog') {
+      openForm('catalog-form');
+      openCatalog(task.id);
+      return;
+    }
+    if (nextView === 'duration-target') {
+      openDurationTarget(task.id);
+      return;
+    }
+    openCourse(task.id);
+    return;
+  }
+  if (task.status === 'READY') {
+    if (nextView === 'practice') {
+      openForm('practice-form');
+      updatePracticeHint();
+      return;
+    }
+    if (nextView === 'duration') {
+      const pending = el('section', 'stage-running');
+      pending.append(el('h3', null, '正在准备时长任务'));
+      pending.append(el('p', null, '正在加载课程与教程，请稍候。'));
+      body.append(pending);
+      return;
+    }
+    const guide = el('section', 'stage-guide');
+    guide.append(el('h3', null, '在左侧选择任务模式'));
+    guide.append(el('p', null, '刷正确率会完成必修或自选题目；刷时长会累计课程学习时长。'));
+    body.append(guide);
+    return;
+  }
+  const mode = task.practice_mode === 'duration' ? '刷时长' : '刷题';
+  // 刷时长在选完课程后会短暂进入运行态去读取目录，随后才出现计时内容选择。
+  const waitingDurationTargets = task.practice_mode === 'duration'
+    && task.status === 'RUNNING'
+    && !(task.selected_duration_targets || []).length
+    && !(task.selected_duration_target || null);
+  const panel = el('section', 'stage-running');
+  const heading = task.status === 'ERROR'
+    ? '任务中断'
+    : waitingDurationTargets
+      ? (task.description || '正在读取计时目录')
+      : '任务运行中';
+  panel.append(el('h3', null, heading));
+  if (task.status === 'ERROR') {
+    panel.append(el('p', null, task.error || task.description || '任务发生错误'));
+  } else if (waitingDurationTargets) {
+    const description = task.description || '正在读取课程的可计时内容。';
+    if (description !== heading) panel.append(el('p', null, description));
+    panel.append(el('p', 'hint', '读取完成后会自动进入下一步，无需刷新页面。'));
+  } else {
+    panel.append(el('p', null, `${mode}正在后台运行，进度和日志会实时更新。`));
+  }
+  if (task.practice_mode === 'catalog' && task.status === 'RUNNING') {
+    const selected = el('p', 'hint', task.description || '正在处理已选题目');
+    panel.append(selected);
+  }
+  body.append(panel);
+}
+
+function recycleStageForms(scope = document) {
+  const templates = $('#stage-templates');
+  if (!templates) return;
+  for (const form of $$('.stage-form', scope)) {
+    if (!templates.contains(form)) templates.append(form);
+  }
+}
+
+function mountStageForm(id, host = null, options = {}) {
+  const form = document.getElementById(id);
+  if (!form) return null;
+  const target = host || $('#stage-body');
+  // 表单是常驻模板：切换视图前先放回模板区，绝不能随中间工作区一起被删除。
+  recycleStageForms();
+  target.textContent = '';
+  form.hidden = false;
+  target.append(form);
+  if (target === $('#stage-body')) {
+    target.dataset.view = state.stageView;
+    target.dataset.taskId = state.stageTaskId || '';
+    const shouldScrollStage = options.scrollIntoView === true || state.scrollStageOnNextForm;
+    state.scrollStageOnNextForm = false;
+    if (shouldScrollStage && window.matchMedia('(max-width: 820px)').matches) {
+      $('.stage')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }
+  return form;
 }
 
 function renderContext(tasks) {
@@ -249,13 +602,17 @@ function renderSidebarCounts() {
 }
 
 function renderTask(task) {
-  const row = el('article', 'task');
+  const row = el('button', 'rail-task');
+  row.type = 'button';
   row.dataset.status = task.status;
   row.dataset.id = task.id;
+  row.classList.toggle('is-active', state.stageTaskId === task.id);
+  row.setAttribute('aria-pressed', state.stageTaskId === task.id ? 'true' : 'false');
+  row.addEventListener('click', () => setStage(task.id));
 
-  const main = el('div', 'task-main');
+  const main = el('div', 'rail-task-main');
   const titleRow = el('div', 'task-title-row');
-  titleRow.append(el('h3', 'task-name', task.name || task.username || task.id));
+  titleRow.append(el('span', 'task-name', task.name || task.username || task.id));
 
   const badge = el('span', 'status', (STATUS[task.status] || { label: task.status }).label);
   badge.dataset.tone = task.status;
@@ -265,11 +622,6 @@ function renderTask(task) {
   const meta = [task.user_name, task.school_name].filter(Boolean).join(' · ');
   if (meta) main.append(el('p', 'task-meta', meta));
 
-  const desc = el('p', 'task-desc', task.description || '');
-  if (task.status === 'ERROR') desc.classList.add('is-error');
-  main.append(desc);
-
-  const progress = el('div', 'task-progress');
   const percent = Math.max(0, Math.min(100, task.progress_percent || 0));
   const ruler = el('div', 'ruler');
   ruler.setAttribute('role', 'progressbar');
@@ -280,20 +632,40 @@ function renderTask(task) {
   const fill = el('span', 'ruler-fill');
   fill.style.width = `${percent}%`;
   ruler.append(fill);
-  progress.append(ruler);
 
   const numbers = el('div', 'progress-numbers');
-  numbers.append(el('strong', null, progressValue(task, task.completed)));
-  numbers.append(el('span', null, `/ ${progressValue(task, task.total)}`));
+  numbers.append(el('strong', null, task.practice_mode === 'duration'
+    ? progressValue(task, task.completed)
+    : `${task.completed || 0} / ${task.total || 0}`));
   numbers.append(el('span', 'pct', `${percent}%`));
-  progress.append(numbers);
-
-  const controls = el('div', 'task-controls');
-  controls.append(...taskControls(task));
-  row.append(main, progress, controls);
-  const choices = taskChoices(task, (action) => runTaskAction(task.id, action));
-  if (choices) row.append(choices);
+  row.append(main, ruler, numbers);
   return row;
+}
+
+function renderModePicker(task, host = null) {
+  const box = host || $('#mode-options');
+  box.textContent = '';
+  const choices = [
+    {
+      mode: 'practice',
+      title: '刷正确率',
+      description: '完成必修题，或从完整目录选择未完成题目。',
+      action: 'practice',
+    },
+    {
+      mode: 'duration',
+      title: '刷时长',
+      description: '选择课程和计时内容，累计学习时长。',
+      action: 'duration',
+    },
+  ];
+  for (const choice of choices) {
+    const node = button(null, 'mode-option', () => runTaskAction(task.id, choice.action));
+    node.dataset.mode = choice.mode;
+    node.dataset.id = task.id;
+    node.append(el('strong', null, choice.title), el('span', null, choice.description));
+    box.append(node);
+  }
 }
 
 function taskChoices(task, onAction) {
@@ -311,10 +683,10 @@ function taskChoices(task, onAction) {
     choices.append(card);
   };
   if (task.status === 'READY') {
-    add('刷题', '完成老师布置的必修内容，或从完整目录中自选未完成题目。',
-      '选择刷题范围', 'practice');
+    add('刷正确率', '完成老师布置的必修内容，或从完整目录中自选未完成题目。',
+      '展开刷题设置', 'practice');
     add('刷时长', '先选课程，再选计时内容与每个练习时长（固定秒数或随机范围）。',
-      '选择课程', 'duration');
+      '展开时长设置', 'duration');
   } else if (task.user_operation === 'CHOOSE_PRACTICE') {
     add('选择要刷的题目', '按单元或小节勾选题目，查看已选数量后确认开始。', '打开题目选择', 'catalog');
   } else if (task.user_operation === 'CHOOSE_DURATION') {
@@ -330,68 +702,37 @@ function taskChoices(task, onAction) {
   return section;
 }
 
-function taskControls(task) {
-  const controls = [];
-  const action = (label, name, className = 'btn btn-ghost btn-sm') => {
-    const node = button(label, className, () => runTaskAction(task.id, name));
-    node.dataset.action = name;
-    node.dataset.id = task.id;
-    return node;
-  };
-
-  switch (task.status) {
-    case 'READY':
-      break;
-    case 'RUNNING':
-      controls.push(action('暂停', 'pause'), action('停止', 'stop'));
-      break;
-    case 'PAUSED':
-      controls.push(action('恢复', 'resume', 'btn btn-primary btn-sm'), action('停止', 'stop'));
-      break;
-    case 'WAITING':
-      controls.push(action('暂停', 'pause'), action('停止', 'stop'));
-      break;
-    case 'NEED_OPERATION': {
-      controls.push(action('暂停', 'pause'));
-      break;
-    }
-    case 'ERROR':
-    case 'COMPLETED':
-      controls.push(action('重试', 'restart', 'btn btn-primary btn-sm'));
-      break;
-    default:
-      break;
-  }
-
-  controls.push(action('管理', 'manage', 'btn-link'));
-  return controls;
-}
-
 async function runTaskAction(taskId, action) {
   if (action === 'manage') {
     openManage(taskId);
     return;
   }
   if (action === 'choose') {
-    openCourse(taskId);
+    state.scrollStageOnNextForm = true;
+    openCourse(taskId, { mounted: true, scrollIntoView: true });
     return;
   }
   if (action === 'practice') {
-    openPracticeSetup(taskId);
+    state.scrollStageOnNextForm = true;
+    openPracticeSetup(taskId, { mounted: true });
     return;
   }
   if (action === 'duration') {
+    state.scrollStageOnNextForm = true;
+    setStage(taskId, 'duration');
     startDuration(taskId);
     return;
   }
   if (action === 'duration-target') {
-    openDurationTarget(taskId);
+    state.scrollStageOnNextForm = true;
+    openDurationTarget(taskId, { mounted: true });
     return;
   }
   if (action === 'catalog') {
+    state.scrollStageOnNextForm = true;
     const task = state.tasks.get(taskId);
     if (task && task.status === 'NEED_OPERATION') {
-      openCatalog(taskId);
+      openCatalog(taskId, { mounted: true });
     } else {
       startCatalog(taskId);
     }
@@ -408,6 +749,7 @@ async function runTaskAction(taskId, action) {
     if (result && result.ok === false) {
       toast('任务当前无法执行该操作，请稍后再试', 'warning');
     }
+    await refreshTaskSnapshot(taskId);
   } catch (error) {
     toast(error.message, 'error');
   }
@@ -498,12 +840,12 @@ async function manageAction(task, action) {
 
 /* ------------------------------------------------------------ 任务设置 */
 
-function openPracticeSetup(taskId) {
+function openPracticeSetup(taskId, options = {}) {
   state.practiceTaskId = taskId;
-  $('#practice-form').reset();
+  const form = enterStage(taskId, 'practice', 'practice-form', options.host || null);
+  if (form) form.reset();
   $('#practice-error').hidden = true;
   updatePracticeHint();
-  $('#practice-dialog').showModal();
 }
 
 function updatePracticeHint() {
@@ -517,7 +859,8 @@ function updatePracticeHint() {
 async function submitPracticeForm(event) {
   event.preventDefault();
   const taskId = state.practiceTaskId;
-  const action = $('input[name="practice-mode"]:checked').value === 'catalog'
+  const chosen = $('input[name="practice-mode"]:checked').value;
+  const action = chosen === 'catalog'
     ? 'catalog' : 'start';
   const submit = $('#practice-submit');
   $('#practice-error').hidden = true;
@@ -525,7 +868,9 @@ async function submitPracticeForm(event) {
   try {
     const result = await api(`/api/tasks/${encodeURIComponent(taskId)}/${action}`, { method: 'POST' });
     if (result?.ok === false) throw new Error('任务当前无法启动，请稍后重试');
-    $('#practice-dialog').close();
+    // 立即在本地记录模式，课程选择页的按钮文案与后续提示才不会退回“必修”。
+    patchTaskMode(taskId, chosen === 'catalog' ? 'catalog' : 'practice');
+    await refreshTaskSnapshot(taskId);
     toast(action === 'catalog' ? '正在加载目录，完成后请选择题目' : '任务已启动，请留意课程选择提示', 'success');
   } catch (error) {
     $('#practice-error').textContent = error.message;
@@ -538,55 +883,276 @@ async function submitPracticeForm(event) {
 async function startDuration(taskId) {
   // 先进入时长模式加载课程列表，随后按“选课程 → 选时长内容 → 设置时长”顺序进行
   state.durationTaskId = taskId;
+  // 立即进入课程步骤并显示加载态，避免等待后端响应时界面像“没反应”。
+  state.courseTaskId = taskId;
+  state.courseSelection = { course: null, resource: null, courses: [], expandedCourseId: null, loaded: false };
+  state.courseLoading = false;
+  const loadingForm = enterStage(taskId, 'course', 'course-form', null);
+  if (loadingForm) {
+    $('#course-search').value = '';
+    $('#course-error').hidden = true;
+    const box = $('#course-options');
+    box.textContent = '';
+    box.append(el('div', 'course-loading', '正在启动任务并读取课程列表，请稍候…'));
+    updateCourseSelection();
+  }
   try {
     const result = await api(`/api/tasks/${encodeURIComponent(state.durationTaskId)}/duration`, {
       method: 'POST',
       body: {},
     });
     if (result?.ok === false) throw new Error('任务当前无法开始刷时长');
-    toast('请先选择课程与教程', 'success');
-    openCourse(taskId);
+    patchTaskMode(taskId, 'duration');
+    await refreshTaskSnapshot(taskId);
+    toast('正在读取课程列表，完成后自动进入选择', 'success');
+    pollDurationCourseList(taskId);
   } catch (error) {
+    renderCourseLoadError(error, () => startDuration(taskId));
     toast(error.message, 'error');
   }
 }
 
-function openDurationTarget(taskId) {
-  const task = state.tasks.get(taskId);
-  if (!task || !Array.isArray(task.duration_targets)) return;
-  state.durationTargetTaskId = taskId;
-  state.durationTargetSelection = new Set();
-  const box = $('#duration-target-options');
+// POST /duration 立即返回，课程列表由任务线程异步加载。WebSocket 推送
+// NEED_OPERATION 后 renderStage 会打开课程选择；这里轮询快照作为 WS
+// 延迟/断线时的兜底，避免“启动成功但课程永远不出来”。
+async function pollDurationCourseList(taskId) {
+  const token = ++state.durationCoursePoll;
+  for (let attempt = 0; attempt < UI_TIMING.durationCoursePollAttempts; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, UI_TIMING.durationCoursePollIntervalMs));
+    if (token !== state.durationCoursePoll || state.durationTaskId !== taskId) return;
+    const current = state.tasks.get(taskId);
+    if (!current || current.status !== 'RUNNING') return;
+    await refreshTaskSnapshot(taskId);
+    const updated = state.tasks.get(taskId);
+    if (updated && updated.status === 'NEED_OPERATION') return;
+  }
+  // 超时后不能让“正在读取课程列表”永远挂着：给出可重试的明确状态。
+  if (
+    token === state.durationCoursePoll &&
+    state.durationTaskId === taskId &&
+    state.stageTaskId === taskId
+  ) {
+    renderDurationCourseTimeout(taskId);
+  }
+}
+
+function renderDurationCourseTimeout(taskId) {
+  const form = enterStage(taskId, 'course', 'course-form', null);
+  if (!form) return;
+  $('#course-search').value = '';
+  $('#course-error').hidden = true;
+  const box = $('#course-options');
   box.textContent = '';
+  const wrap = el('div', 'load-error');
+  wrap.append(el('span', null, '课程列表读取超时，请检查网络后重试'));
+  wrap.append(button('重试', 'btn btn-ghost btn-sm', () => retryDurationCourseList(taskId)));
+  box.append(wrap);
+  updateCourseSelection();
+}
+
+async function retryDurationCourseList(taskId) {
+  const box = $('#course-options');
+  if (box) {
+    box.textContent = '';
+    box.append(el('div', 'course-loading', '正在重新读取课程列表，请稍候…'));
+  }
+  await refreshTaskSnapshot(taskId);
+  const task = state.tasks.get(taskId);
+  if (task && task.status === 'NEED_OPERATION') return; // renderStage 已打开课程选择
+  if (task && task.status === 'RUNNING') pollDurationCourseList(taskId);
+}
+
+// 后端启动接口只返回 ok，本地任务的 practice_mode 需要立即同步，
+// 否则课程选择步骤会误判为“必修模式”。
+function patchTaskMode(taskId, mode) {
+  const task = state.tasks.get(taskId);
+  if (task && task.practice_mode !== mode) {
+    task.practice_mode = mode;
+    state.tasks.set(taskId, task);
+  }
+}
+
+function openDurationTarget(taskId, options = {}) {
+  const task = state.tasks.get(taskId);
+  if (!task) return;
+  if (!Array.isArray(task.duration_targets) || task.duration_targets.length === 0) {
+    // 后端尚未回传可计时内容时给出可见提示，避免中间区域变成空白。
+    const form = enterStage(taskId, 'duration-target', 'duration-target-form', options.host || null);
+    if (!form) return;
+    $('#duration-target-options').textContent = '';
+    $('#duration-target-options').append(
+      el('div', 'saved-empty', '暂未获取到可计时内容，请稍候或重新选择课程。')
+    );
+    $('#duration-target-count').textContent = '0 个';
+    resetDurationTargetSelection();
+    refreshDurationTargetForm();
+    return;
+  }
+  state.durationTargetTaskId = taskId;
+  resetDurationTargetSelection();
+  // 后端已自动选中的内容（如单项教程）前端同步勾选，用户只需确认并设时长
+  for (const selected of task.selected_duration_targets || []) {
+    const match = task.duration_targets.find((t) => t.group_id === selected.group_id);
+    if (match) {
+      state.durationTargetSelection.add(match);
+      state.durationTargetUnitSelection.add(
+        String(match.unit_id != null ? match.unit_id : durationTargetUnitLabel(match)),
+      );
+    }
+  }
+  const form = enterStage(taskId, 'duration-target', 'duration-target-form', options.host || null);
+  if (!form) return;
   $('#duration-target-count').textContent = `${task.duration_targets.length} 个`;
   $('#duration-target-error').hidden = true;
   $('#duration-per-practice').value = task?.duration_param || '30';
+  renderDurationTargets(task.duration_targets);
+  refreshDurationTargetForm();
+}
 
-  for (const target of task.duration_targets) {
-    const node = courseCheckbox(
-      target.name || target.group_id,
-      target.path || target.group_id,
-      false,
-      (checked) => {
-        if (checked) state.durationTargetSelection.add(target);
-        else state.durationTargetSelection.delete(target);
-        refreshDurationTargetForm();
-      },
+function resetDurationTargetSelection() {
+  state.durationTargetSelection = new Set();
+  state.durationTargetUnitSelection = new Set();
+  state.durationTargetExpanded = new Set();
+}
+
+function durationTargetUnitLabel(target) {
+  if (target.unit_name) return target.unit_name;
+  const parts = String(target.path || '').split(' / ').filter(Boolean);
+  if (parts[0]) return parts[0];
+  if (Number.isInteger(target.unit_index)) return `单元 ${target.unit_index + 1}`;
+  return target.unit_id || '单元';
+}
+
+function durationUnitKey(group) {
+  return String(group.unit_id || group.label);
+}
+
+function setDurationUnitSelection(group, checked) {
+  // 单元是独立“整包选择”：勾选代表整个单元，不逐个点亮子项。
+  const key = durationUnitKey(group);
+  if (checked) state.durationTargetUnitSelection.add(key);
+  else state.durationTargetUnitSelection.delete(key);
+}
+
+// 勾选单元=默认刷整个单元；子项保持不勾。勾小节时单元自动进入半选。
+function durationUnitCheckbox(group, targets) {
+  const checkbox = el('input', 'option-check');
+  checkbox.type = 'checkbox';
+  const key = durationUnitKey(group);
+  const selectedChildren = group.items.filter((t) => state.durationTargetSelection.has(t)).length;
+  const wholeUnit = state.durationTargetUnitSelection.has(key);
+  checkbox.checked = wholeUnit || (selectedChildren === group.items.length && group.items.length > 0);
+  checkbox.indeterminate = !wholeUnit && selectedChildren > 0 && selectedChildren < group.items.length;
+  checkbox.setAttribute('aria-label', `选择整个单元：${group.label}`);
+  checkbox.addEventListener('click', (event) => event.stopPropagation());
+  checkbox.addEventListener('change', () => {
+    setDurationUnitSelection(group, checkbox.checked);
+    // 不重建列表（重建会丢失展开状态和滚动位置），只原地更新摘要和计数
+    const head = checkbox.closest('.duration-unit-head');
+    if (head) {
+      const meta = head.querySelector('.duration-unit-meta');
+      if (meta) meta.textContent = checkbox.checked ? '整个单元' : `${group.items.length} 项`;
+    }
+    refreshDurationTargetForm();
+  });
+  return checkbox;
+}
+
+// 按单元分组，渲染“单元（点击展开）→ 练习（可勾选）”两级目录。
+function renderDurationTargets(targets) {
+  const box = $('#duration-target-options');
+  box.textContent = '';
+  const groups = new Map();
+  for (const target of targets) {
+    const key = String(target.unit_id != null ? target.unit_id : durationTargetUnitLabel(target));
+    if (!groups.has(key)) groups.set(key, { unit_id: key, label: durationTargetUnitLabel(target), items: [] });
+    groups.get(key).items.push(target);
+  }
+  state.durationTargetExpanded = state.durationTargetExpanded || new Set();
+
+  for (const [key, group] of groups) {
+    const expanded = state.durationTargetExpanded.has(key);
+    const node = el('div', 'duration-unit');
+    node.classList.toggle('is-expanded', expanded);
+
+    // 用原生 <button> 处理展开/收起，复选框独立放旁边，彻底避免事件冒泡问题。
+    const toggleExpand = () => {
+      if (state.durationTargetExpanded.has(key)) state.durationTargetExpanded.delete(key);
+      else state.durationTargetExpanded.add(key);
+      renderDurationTargets(targets);
+    };
+    const head = el('button', 'duration-unit-head');
+    head.type = 'button';
+    head.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    head.addEventListener('click', toggleExpand);
+    const chosenInUnit = group.items.filter((t) => state.durationTargetSelection.has(t)).length;
+    const wholeUnit = state.durationTargetUnitSelection.has(durationUnitKey(group));
+    head.append(
+      el('span', 'duration-unit-caret', expanded ? '▾' : '▸'),
+      el('span', 'duration-unit-badge', '单元'),
+      el('span', 'duration-unit-title', group.label),
+      el('span', 'duration-unit-meta',
+        wholeUnit ? '整个单元'
+          : chosenInUnit ? `已选 ${chosenInUnit} / ${group.items.length}` : `${group.items.length} 项`),
     );
-    node.dataset.groupId = target.group_id;
+    const checkbox = durationUnitCheckbox(group, targets);
+    const headRow = el('div', 'duration-unit-head-row');
+    headRow.append(head, checkbox);
+    node.append(headRow);
+
+    if (expanded) {
+      const children = el('div', 'duration-unit-children');
+      for (const target of group.items) {
+        const selected = state.durationTargetSelection.has(target);
+        const pathParts = String(target.path || '').split(' / ').filter(Boolean);
+        const row = courseCheckbox(
+          target.name || target.group_id,
+          pathParts.slice(1).join(' / ') || target.group_id,
+          selected,
+          (checked) => {
+            if (checked) state.durationTargetSelection.add(target);
+            else state.durationTargetSelection.delete(target);
+            // 用户细化到小节时取消整单元粗选，避免语义叠加。
+            state.durationTargetUnitSelection.delete(durationUnitKey(group));
+            // 只刷新勾选状态与摘要，避免重建列表丢失展开状态
+            renderDurationTargets(targets);
+            refreshDurationTargetForm();
+          },
+        );
+        row.classList.add('duration-item');
+        row.dataset.groupId = target.group_id;
+        children.append(row);
+      }
+      node.append(children);
+    }
     box.append(node);
   }
-  refreshDurationTargetForm();
-  $('#duration-target-dialog').showModal();
 }
 
 // 根据已勾选内容与时长输入刷新摘要、校验提示和提交按钮状态
+function durationEffectiveTargets(targets) {
+  const groups = new Map();
+  for (const target of targets) {
+    const key = String(target.unit_id != null ? target.unit_id : durationTargetUnitLabel(target));
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(target);
+  }
+  const chosen = [];
+  for (const [key, items] of groups) {
+    if (state.durationTargetUnitSelection.has(key)) chosen.push(...items);
+    else chosen.push(...items.filter((item) => state.durationTargetSelection.has(item)));
+  }
+  return chosen;
+}
+
 function refreshDurationTargetForm() {
-  const chosen = [...(state.durationTargetSelection || [])];
+  const chosen = durationEffectiveTargets(
+    state.tasks.get(state.durationTargetTaskId)?.duration_targets || [],
+  );
   const param = durationParamValue();
   $('#duration-target-summary').textContent = chosen.length
-    ? `已选 ${chosen.length} 项：${chosen.map((t) => t.name || t.group_id).join('、')}`
-    : '请选择要累计时长的学习内容（可多选，同时并行计时）';
+    ? `已选 ${chosen.length} 个练习；勾选单元标题可一次选择整个单元`
+    : '勾选单元标题刷整个单元，或展开后勾选具体练习（可多选，同时并行计时）';
   $('#duration-target-submit').disabled = chosen.length === 0 || !param.valid;
   const errorBox = $('#duration-target-error');
   if (param.valid) {
@@ -601,6 +1167,42 @@ function refreshDurationTargetForm() {
   return { chosen, param };
 }
 
+async function backToCourseSelection(taskId) {
+  if (!taskId || state.durationGoingBack) return;
+  const task = state.tasks.get(taskId);
+  if (!task || task.status !== 'NEED_OPERATION' || task.user_operation !== 'CHOOSE_DURATION') return;
+  const backButton = $('[data-action="back-course"]');
+  if (backButton) backButton.disabled = true;
+  state.durationGoingBack = true;
+  const finish = () => {
+    state.durationGoingBack = false;
+    const button = $('[data-action="back-course"]');
+    if (button) button.disabled = false;
+  };
+  let confirmed = false;
+  try {
+    confirmed = await confirmAction(
+      '返回课程选择',
+      '返回后需要重新选择课程与教程；当前已勾选的计时内容不会保留。',
+      '返回',
+    );
+    if (!confirmed) return;
+    const result = await api(`/api/tasks/${encodeURIComponent(taskId)}/restart`, { method: 'POST' });
+    if (result?.ok === false) throw new Error('任务当前无法返回上一级');
+    patchTaskMode(taskId, 'duration');
+    resetDurationTargetSelection();
+    state.durationTargetTaskId = null;
+    await refreshTaskSnapshot(taskId);
+    state.scrollStageOnNextForm = true;
+    toast('已返回课程选择', 'success');
+    startDuration(taskId);
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    finish();
+  }
+}
+
 async function submitDurationTargetForm(event) {
   event.preventDefault();
   const { chosen, param } = refreshDurationTargetForm();
@@ -609,14 +1211,15 @@ async function submitDurationTargetForm(event) {
   const submit = $('#duration-target-submit');
   submit.disabled = true;
   try {
-    await api(`/api/tasks/${encodeURIComponent(state.durationTargetTaskId)}/duration/choose`, {
+    const taskId = state.durationTargetTaskId;
+    await api(`/api/tasks/${encodeURIComponent(taskId)}/duration/choose`, {
       method: 'POST',
       body: {
         target_ids: chosen.map((target) => target.group_id),
         duration: param.text,
       },
     });
-    $('#duration-target-dialog').close();
+    await refreshTaskSnapshot(taskId);
     toast(`已选择 ${chosen.length} 个内容，每项 ${param.text} 秒，开始并行累计学习时长`, 'success');
   } catch (error) {
     errorBox.textContent = error.message;
@@ -652,32 +1255,54 @@ function durationParamValue() {
 
 /* ------------------------------------------------------------ 选择课程 */
 
-async function openCourse(taskId) {
+async function openCourse(taskId, options = {}) {
+  const requestId = ++state.courseRequestId;
   state.courseTaskId = taskId;
-  state.courseSelection = { course: null, resource: null, courses: [] };
+  state.courseSelection = { course: null, resource: null, courses: [], expandedCourseId: null, loaded: false };
   state.courseQuery = '';
+  state.courseLoading = false;
+  const form = enterStage(taskId, 'course', 'course-form', options.host || null, {
+    scrollIntoView: options.scrollIntoView === true,
+  });
+  if (!form) return;
   $('#course-search').value = '';
   $('#course-error').hidden = true;
 
+  state.courseLoading = true;
   let courses;
   try {
     courses = await api(`/api/tasks/${encodeURIComponent(taskId)}/courses`);
   } catch (error) {
-    toast(error.message, 'error');
+    if (requestId === state.courseRequestId) {
+      state.courseLoading = false;
+      renderCourseLoadError(error, () => openCourse(taskId, { mounted: true, scrollIntoView: true }));
+      toast(error.message, 'error');
+    }
     return;
   }
+  if (requestId !== state.courseRequestId || state.courseTaskId !== taskId) return;
 
   state.courseSelection.courses = Array.isArray(courses) ? courses : [];
+  state.courseSelection.loaded = true;
+  state.courseLoading = false;
   renderCourseOptions();
-  $('#course-dialog').showModal();
+}
+
+function renderCourseLoadError(error, onRetry) {
+  const box = $('#course-options');
+  if (!box) return;
+  box.textContent = '';
+  const wrap = el('div', 'load-error');
+  wrap.append(el('span', null, `课程加载失败：${error.message}`));
+  wrap.append(button('重试', 'btn btn-ghost btn-sm', onRetry));
+  box.append(wrap);
+  updateCourseSelection();
 }
 
 function renderCourseOptions() {
   const selection = state.courseSelection;
   const courseBox = $('#course-options');
-  const resourceBox = $('#resource-options');
   courseBox.textContent = '';
-  resourceBox.textContent = '';
   const query = state.courseQuery.trim().toLowerCase();
   const courses = selection.courses.filter((course) =>
     !query || (course.name || '').toLowerCase().includes(query) ||
@@ -687,45 +1312,91 @@ function renderCourseOptions() {
 
   if (!selection.courses.length) {
     courseBox.append(el('div', 'saved-empty', '没有可选课程'));
-    $('#resource-option-count').textContent = '0 个';
     updateCourseSelection();
     return;
   }
   if (!courses.length) {
     courseBox.append(el('div', 'saved-empty', '没有匹配的课程'));
+    updateCourseSelection();
+    return;
   }
 
   for (const course of courses) {
-    const node = courseOption('course', course.name || `课程 ${course.id}`,
-      `${(course.resources || []).length} 个教程`, selection.course?.id === course.id, () => {
-      selection.course = course;
-      // 课程下只有一门教程时自动选中，省去多余点击
-      const resources = course.resources || [];
-      selection.resource = resources.length === 1 ? resources[0] : null;
-      renderResourceOptions();
-    });
-    courseBox.append(node);
+    courseBox.append(courseTreeItem(course));
   }
-  renderResourceOptions();
+  updateCourseSelection();
 }
 
-function courseOption(name, title, description, checked, onChange) {
-  const node = el('label', 'option');
-  const radio = el('input', 'option-radio');
-  radio.type = 'radio';
-  radio.name = name;
-  radio.checked = checked;
-  radio.addEventListener('change', onChange);
-  const content = el('span', 'option-content');
-  content.append(el('strong', null, title), el('small', null, description));
-  node.append(radio, content, el('span', 'option-selected', '已选'));
-  return node;
+// 一级课程行：点击在下方原地展开该课程下的教程（二级目录），让一屏显示更多内容。
+function courseTreeItem(course) {
+  const selection = state.courseSelection;
+  const expanded = selection.expandedCourseId === course.id;
+  const group = el('div', 'course-node');
+  group.classList.toggle('is-expanded', expanded);
+
+  const resources = course.resources || [];
+  const row = el('button', 'course-node-head');
+  row.type = 'button';
+  row.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  row.append(
+    el('span', 'course-node-caret', expanded ? '▾' : '▸'),
+    el('span', 'course-node-title', course.name || `课程 ${course.id}`),
+    el('span', 'course-node-meta', `${resources.length} 个教程`),
+  );
+  row.addEventListener('click', (event) => {
+    event.stopPropagation();
+    selection.course = course;
+    if (expanded) {
+      // 收起只改变展示，不丢掉已选教程
+      selection.expandedCourseId = null;
+    } else {
+      const resources = course.resources || [];
+      const belongsToCourse = selection.resource
+        && resources.some((item) => item.id === selection.resource.id);
+      // 与旧版两栏选择保持一致：课程下只有一门教程时自动选中
+      selection.resource = resources.length === 1
+        ? resources[0]
+        : (belongsToCourse ? selection.resource : null);
+      selection.expandedCourseId = course.id;
+    }
+    renderCourseOptions();
+  });
+  group.append(row);
+
+  if (expanded) {
+    const sub = el('div', 'course-node-children');
+    if (!resources.length) {
+      sub.append(el('div', 'course-node-empty', '该课程没有教程'));
+    } else {
+      for (const resource of resources) {
+        const selected = selection.resource?.id === resource.id;
+        const item = el('button', 'course-leaf');
+        item.type = 'button';
+        item.classList.toggle('is-selected', selected);
+        item.setAttribute('aria-pressed', selected ? 'true' : 'false');
+        item.append(
+          el('span', 'course-leaf-title', resource.name || `教程 ${resource.id}`),
+          el('span', 'course-leaf-meta',
+            `必修 ${resource.finish_point_num ?? 0} / ${resource.total_point_num ?? 0}`),
+        );
+        item.addEventListener('click', (event) => {
+          event.stopPropagation();
+          selection.course = course;
+          selection.resource = resource;
+          renderCourseOptions();
+        });
+        sub.append(item);
+      }
+    }
+    group.append(sub);
+  }
+  return group;
 }
 
 // 多选版旁白项：用于并行计时内容勾选，onChange 收到布尔值
 function courseCheckbox(title, description, checked, onChange) {
   const node = el('label', 'option');
-  const box = el('input', 'option-radio');
+  const box = el('input', 'option-check');
   box.type = 'checkbox';
   box.checked = checked;
   box.addEventListener('change', () => onChange(box.checked));
@@ -737,7 +1408,9 @@ function courseCheckbox(title, description, checked, onChange) {
 
 function updateCourseSelection() {
   const { course, resource } = state.courseSelection;
-  const mode = state.tasks.get(state.courseTaskId)?.practice_mode;
+  // 优先用任务上的模式；启动流程尚未落库时回退到当前阶段，避免误显示“必修”。
+  const task = state.tasks.get(state.courseTaskId);
+  const mode = task?.practice_mode || state.stageView;
   $('#course-selection-summary').textContent = resource
     ? `已选：${course.name || '课程'} / ${resource.name || '教程'}`
     : course ? `已选课程：${course.name || '课程'}，请继续选择教程` : '请选择一门课程，再选择教程';
@@ -750,54 +1423,19 @@ function updateCourseSelection() {
   $('#course-error').hidden = true;
 }
 
-function renderResourceOptions() {
-  const selection = state.courseSelection;
-  const box = $('#resource-options');
-  box.textContent = '';
-  const query = state.courseQuery.trim().toLowerCase();
-  const resources = selection.course
-    ? (selection.course.resources || []).filter((resource) =>
-        !query || (selection.course.name || '').toLowerCase().includes(query) ||
-        (resource.name || '').toLowerCase().includes(query)
-      )
-    : [];
-  $('#resource-option-count').textContent = `${resources.length} 个`;
-  updateCourseSelection();
-
-  if (!resources.length) {
-    let message = '请先选择课程';
-    if (selection.course) {
-      message = (selection.course.resources || []).length
-        ? '没有匹配的教程'
-        : '该课程没有教程';
-    }
-    box.append(el('div', 'saved-empty', message));
-    return;
-  }
-
-  for (const resource of resources) {
-    const node = courseOption('resource', resource.name || `教程 ${resource.id}`,
-      `必修已完成 ${resource.finish_point_num ?? 0} / ${resource.total_point_num ?? 0}`,
-      selection.resource?.id === resource.id, () => {
-      selection.resource = resource;
-      updateCourseSelection();
-    });
-    box.append(node);
-  }
-}
-
 /* ------------------------------------------------------------ 全目录刷题 */
 
 async function startCatalog(taskId) {
   try {
     await api(`/api/tasks/${encodeURIComponent(taskId)}/catalog`, { method: 'POST' });
+    await refreshTaskSnapshot(taskId);
     toast('正在加载题目目录，完成后会提示选择题目', 'info');
   } catch (error) {
     toast(error.message, 'error');
   }
 }
 
-async function openCatalog(taskId) {
+async function openCatalog(taskId, options = {}) {
   const requestId = ++state.catalogRequestId;
   state.catalogTaskId = taskId;
   state.catalog = null;
@@ -819,12 +1457,24 @@ async function openCatalog(taskId) {
   $('#catalog-filter').value = 'all';
   $('#catalog-start').disabled = true;
   renderCatalogContext();
+  enterStage(taskId, 'catalog', 'catalog-form', options.host || null);
 
   let tree;
   try {
     tree = await api(`/api/tasks/${encodeURIComponent(taskId)}/catalog`);
   } catch (error) {
-    if (requestId === state.catalogRequestId) toast(error.message, 'error');
+    if (requestId !== state.catalogRequestId) return;
+    const treeBox = $('#catalog-tree');
+    if (treeBox) {
+      treeBox.textContent = '';
+      const wrap = el('div', 'load-error');
+      wrap.append(el('span', null, `目录加载失败：${error.message}`));
+      wrap.append(button('重试', 'btn btn-ghost btn-sm', () => openCatalog(taskId, { mounted: true })));
+      treeBox.append(wrap);
+    }
+    $('#catalog-summary').textContent = '目录加载失败';
+    $('#catalog-start').disabled = true;
+    toast(error.message, 'error');
     return;
   }
   // 并发的重复请求只渲染最后一次，避免覆盖已勾选内容
@@ -832,7 +1482,6 @@ async function openCatalog(taskId) {
 
   state.catalog = tree;
   renderCatalogTree(tree);
-  $('#catalog-dialog').showModal();
 }
 
 function catalogLabel(node) {
@@ -963,7 +1612,7 @@ function renderCatalogNavigation(preserveSelection = false) {
   }
   for (const unit of visibleUnits) box.append(renderCatalogNode(unit, 0));
   renderCatalogItems();
-  syncCatalogChecks(preserveSelection);
+  syncCatalogChecks();
 }
 
 function renderCatalogNode(node, depth) {
@@ -1150,7 +1799,7 @@ function renderCatalogItems() {
   syncCatalogChecks();
 }
 
-function syncCatalogChecks(preserveSelection = true) {
+function syncCatalogChecks() {
   $$('.catalog-check', $('#catalog-tree')).forEach((checkbox) => {
     const key = checkbox.dataset.nodeId;
     const node = state.catalogNodeByKey.get(key);
@@ -1425,6 +2074,11 @@ function handleEvent(event) {
     case 'snapshot': {
       const tasks = Array.isArray(event.data) ? event.data : [];
       state.tasks = new Map(tasks.map((task) => [task.id, task]));
+      if (!state.stageTaskId || !state.tasks.has(state.stageTaskId)) {
+        const first = tasks[0];
+        state.stageTaskId = first ? first.id : null;
+        state.stageView = first ? taskMode(first) : 'empty';
+      }
       renderTasks();
       break;
     }
@@ -1433,6 +2087,7 @@ function handleEvent(event) {
       const task = event.data;
       if (!task || !task.id) return;
       state.tasks.set(task.id, task);
+      if (!state.stageTaskId) state.stageTaskId = task.id;
       renderTasks();
       maybeRemember(task);
       if (task.status === 'ERROR') {
@@ -1672,13 +2327,51 @@ function openNavigation(tab) {
     return;
   }
   if (tab === 'accounts') {
-    openAddDialog();
-    setAddMode('saved');
+    toggleSidebarAccounts();
     return;
   }
   $('#page-label').textContent = '任务总览';
   $('#workspace-title').textContent = '任务总览';
   $('#workspace-description').textContent = '统一管理课程任务与学习进度';
+}
+
+function toggleSidebarAccounts() {
+  const box = $('#sidebar-accounts');
+  if (!box) return;
+  const willOpen = box.hidden;
+  box.hidden = !willOpen;
+  if (willOpen) renderSidebarAccounts();
+}
+
+function renderSidebarAccounts() {
+  const box = $('#sidebar-accounts');
+  if (!box) return;
+  box.textContent = '';
+  if (!state.credentials.length) {
+    box.append(el('p', 'sidebar-account-empty', '还没有保存的账号'));
+    return;
+  }
+  for (const credential of state.credentials) {
+    const row = el('div', 'sidebar-account');
+    row.append(el('span', 'sidebar-account-name', credential.label ? `${credential.label} · ${credential.username}` : credential.username));
+    const remove = button('×', 'icon-btn sidebar-account-remove', async (event) => {
+      event.stopPropagation();
+      const confirmed = await confirmAction('删除已保存账号', `将删除 ${credential.username} 的本地凭据。`, '删除');
+      if (!confirmed) return;
+      try {
+        await api(`/api/credentials/${encodeURIComponent(credential.id)}`, { method: 'DELETE' });
+        state.credentials = state.credentials.filter((item) => item.id !== credential.id);
+        renderSidebarAccounts();
+        renderSidebarCounts();
+        if (!$('#add-saved').hidden) renderCredentials();
+      } catch (error) {
+        toast(error.message, 'error');
+      }
+    });
+    remove.setAttribute('aria-label', `删除 ${credential.username}`);
+    row.append(remove);
+    box.append(row);
+  }
 }
 
 /* ------------------------------------------------------------ 主题 */
@@ -1702,6 +2395,7 @@ function openAddDialog() {
 
 async function submitCatalogForm(event) {
   event.preventDefault();
+  if (state.catalogSubmitting) return;
   const errorBox = $('#catalog-error');
   errorBox.hidden = true;
   const ids = [...state.catalogSelection];
@@ -1711,22 +2405,74 @@ async function submitCatalogForm(event) {
     return;
   }
 
+  const submit = $('#catalog-start');
+  state.catalogSubmitting = true;
+  submit.disabled = true;
   try {
-    await api(`/api/tasks/${encodeURIComponent(state.catalogTaskId)}/catalog/choose`, {
+    const taskId = state.catalogTaskId;
+    await api(`/api/tasks/${encodeURIComponent(taskId)}/catalog/choose`, {
       method: 'POST',
       body: { task_ids: ids },
     });
-    $('#catalog-dialog').close();
+    await refreshTaskSnapshot(taskId);
     toast(`已选择 ${ids.length} 道题，开始刷题`, 'success');
   } catch (error) {
     errorBox.textContent = error.message;
     errorBox.hidden = false;
+  } finally {
+    state.catalogSubmitting = false;
+    syncCatalogChecks();
+  }
+}
+
+async function submitCourseForm(event) {
+  event.preventDefault();
+  if (state.courseSubmitting) return;
+  const selection = state.courseSelection;
+  const errorBox = $('#course-error');
+  if (!selection.course || !selection.resource) {
+    errorBox.textContent = '请选择课程和教程';
+    errorBox.hidden = false;
+    return;
+  }
+  const submit = $('#course-submit');
+  state.courseSubmitting = true;
+  submit.disabled = true;
+  try {
+    await api(`/api/tasks/${encodeURIComponent(state.courseTaskId)}/choose`, {
+      method: 'POST',
+      body: {
+        course_id: selection.course.id,
+        resource_id: selection.resource.id,
+      },
+    });
+    await refreshTaskSnapshot(state.courseTaskId);
+  } catch (error) {
+    errorBox.textContent = error.message;
+    errorBox.hidden = false;
+  } finally {
+    state.courseSubmitting = false;
+    updateCourseSelection();
+  }
+}
+
+async function refreshTaskSnapshot(taskId) {
+  if (!taskId) return;
+  try {
+    const task = await api(`/api/tasks/${encodeURIComponent(taskId)}`);
+    if (task && task.id) {
+      state.tasks.set(task.id, task);
+      renderTasks();
+    }
+  } catch {
+    // WebSocket 仍会推送后续状态；这里是提交后的即时反馈，失败不额外打断流程。
   }
 }
 
 function bindEvents() {
   $('#add-task').addEventListener('click', openAddDialog);
   $('#add-task-empty').addEventListener('click', openAddDialog);
+  $('#rail-add-task').addEventListener('click', openAddDialog);
   $('#add-form').addEventListener('submit', submitAddForm);
   $('#task-search').addEventListener('input', (event) => {
     state.taskQuery = event.target.value;
@@ -1736,11 +2482,23 @@ function bindEvents() {
     node.addEventListener('click', () => openNavigation(node.dataset.nav));
   });
 
-  $('#practice-form').addEventListener('submit', submitPracticeForm);
+  document.addEventListener('submit', (event) => {
+    if (event.target === $('#practice-form')) {
+      event.preventDefault();
+      submitPracticeForm(event);
+    } else if (event.target === $('#duration-target-form')) {
+      event.preventDefault();
+      submitDurationTargetForm(event);
+    } else if (event.target === $('#catalog-form')) {
+      event.preventDefault();
+      submitCatalogForm(event);
+    } else if (event.target === $('#course-form')) {
+      event.preventDefault();
+      submitCourseForm(event);
+    }
+  });
   $$('input[name="practice-mode"]').forEach((node) => node.addEventListener('change', updatePracticeHint));
-  $('#duration-target-form').addEventListener('submit', submitDurationTargetForm);
   $('#duration-per-practice').addEventListener('input', refreshDurationTargetForm);
-  $('#catalog-form').addEventListener('submit', submitCatalogForm);
   $('#catalog-select-all').addEventListener('click', selectAllCatalog);
   $('#catalog-clear').addEventListener('click', () => {
     state.catalogSelection = new Set();
@@ -1765,30 +2523,6 @@ function bindEvents() {
 
   $$('.seg').forEach((node) => {
     node.addEventListener('click', () => setAddMode(node.dataset.addMode));
-  });
-
-  $('#course-form').addEventListener('submit', async (event) => {
-    event.preventDefault();
-    const selection = state.courseSelection;
-    const errorBox = $('#course-error');
-    if (!selection.course || !selection.resource) {
-      errorBox.textContent = '请选择课程和教程';
-      errorBox.hidden = false;
-      return;
-    }
-    try {
-      await api(`/api/tasks/${encodeURIComponent(state.courseTaskId)}/choose`, {
-        method: 'POST',
-        body: {
-          course_id: selection.course.id,
-          resource_id: selection.resource.id,
-        },
-      });
-      $('#course-dialog').close();
-    } catch (error) {
-      errorBox.textContent = error.message;
-      errorBox.hidden = false;
-    }
   });
 
   $('#debug-open').addEventListener('click', () => openDrawer('logs'));
@@ -1925,6 +2659,12 @@ async function boot() {
     state.credentials = credentials || [];
     state.logs = logs || [];
     state.network = network || [];
+    // 首次从 REST 载入时默认选中第一条任务，左侧模式区才能立即展开。
+    if (!state.stageTaskId || !state.tasks.has(state.stageTaskId)) {
+      const first = (tasks || [])[0];
+      state.stageTaskId = first ? first.id : null;
+      state.stageView = first ? taskMode(first) : 'empty';
+    }
   } catch (error) {
     toast(error.message, 'error');
   }
