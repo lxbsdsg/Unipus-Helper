@@ -380,7 +380,10 @@ class Task:
             else:
                 self.selected_duration_targets = []
 
-        if len(targets) > 1:
+        # 即使只有 1 个计时内容，只要用户还没设置每项时长，也要进入选择界面。
+        # 否则会跳过设置时长的步骤并直接报错"未设置每个练习的学习时长"。
+        needs_duration_choice = len(targets) > 1 or not self.duration_param
+        if needs_duration_choice:
             self._begin_user_operation(
                 UserOperation.CHOOSE_DURATION, generation=generation
             )

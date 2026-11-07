@@ -30,4 +30,7 @@ unipus_web = ["web/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q -m \"not e2e\""
+markers = [
+  "e2e: mocked-browser integration tests (run explicitly with -m e2e)",
+]

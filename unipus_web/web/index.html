@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231f6feb'/%3E%3Cpath d='M11 9v8a5 5 0 0 0 10 0V9' fill='none' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
   <title>Unipus Helper</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -43,6 +44,7 @@
           <span>已保存账号</span>
           <span class="nav-count" id="credential-nav-count">0</span>
         </button>
+        <div id="sidebar-accounts" class="sidebar-accounts" hidden></div>
       </nav>
 
       <div class="sidebar-foot">
@@ -85,56 +87,58 @@
       </header>
 
       <main id="main" class="main">
-        <section id="tasks-view" class="view" aria-labelledby="tasks-heading">
-          <div class="summary-grid" aria-label="任务状态概览">
-            <div class="summary-box">
-              <span class="summary-label">全部任务</span>
-              <strong id="summary-total">0</strong>
-              <span class="summary-note">已建立的学习任务</span>
-            </div>
-            <div class="summary-box">
-              <span class="summary-label">正在运行</span>
-              <strong id="summary-running">0</strong>
-              <span class="summary-note">后台自动化任务</span>
-            </div>
-            <div class="summary-box">
-              <span class="summary-label">需要处理</span>
-              <strong id="summary-attention">0</strong>
-              <span class="summary-note">等待选择或发生错误</span>
-            </div>
-            <div class="summary-box">
-              <span class="summary-label">已完成</span>
-              <strong id="summary-completed">0</strong>
-              <span class="summary-note">学习任务已结束</span>
-            </div>
-          </div>
-
-          <section class="panel task-panel" aria-labelledby="tasks-heading">
-            <header class="panel-head">
+        <section id="tasks-view" class="workbench-view" aria-labelledby="tasks-heading">
+          <aside class="task-rail" aria-label="任务与模式选择">
+            <div class="rail-head">
               <div>
-                <h2 id="tasks-heading">任务列表</h2>
+                <h2 id="tasks-heading">任务与模式</h2>
                 <p id="task-summary" class="section-meta">0 个任务</p>
               </div>
-              <label class="search-control">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="5.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M15 15l4 4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
-                <input id="task-search" type="search" aria-label="搜索任务" placeholder="搜索任务、用户或账号">
-              </label>
-            </header>
-
-            <div id="task-list" class="task-list" aria-live="polite"></div>
-
-            <div id="empty-state" class="empty">
-              <div class="empty-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24"><path d="M5 5h14v14H5zM8.5 9h7M8.5 12h7M8.5 15h4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-              </div>
+              <button id="rail-add-task" class="icon-btn" type="button" aria-label="添加任务" title="添加任务">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+              </button>
+            </div>
+            <label class="search-control rail-search">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="5.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M15 15l4 4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+              <input id="task-search" type="search" aria-label="搜索任务" placeholder="搜索任务、用户或账号">
+            </label>
+            <div id="task-list" class="rail-task-list" aria-live="polite"></div>
+            <div id="empty-state" class="empty rail-empty">
               <p class="empty-title">还没有任务</p>
-              <p class="empty-copy">登录 U校园账号后，程序会读取课程与必修任务。账号信息只保存在这台电脑上。</p>
+              <p class="empty-copy">登录 U校园账号后，任务会出现在这里。</p>
               <button id="add-task-empty" class="btn btn-primary" type="button">添加任务</button>
             </div>
-
             <div id="task-search-empty" class="empty empty-compact" hidden>
               <p class="empty-title">没有匹配的任务</p>
               <p class="empty-copy">换一个关键词试试。</p>
+            </div>
+            <div class="mode-picker">
+              <p class="rail-label">任务模式</p>
+              <div id="mode-options" class="mode-options" role="group" aria-label="任务模式"></div>
+            </div>
+          </aside>
+
+          <section class="stage" aria-label="任务工作区">
+            <div id="workbench-empty" class="stage-empty">
+              <div class="empty-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M5 5h14v14H5zM8.5 9h7M8.5 12h7M8.5 15h4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+              </div>
+              <p class="empty-title">先选择一个任务</p>
+              <p class="empty-copy">任务模式和进度会在这里展开，不再叠加弹窗。</p>
+            </div>
+
+            <div id="stage-content" class="stage-content" hidden>
+              <header class="stage-head">
+                <div class="stage-title">
+                  <span id="stage-kicker" class="stage-kicker">当前任务</span>
+                  <h2 id="stage-title">任务</h2>
+                  <p id="stage-subtitle" class="stage-subtitle"></p>
+                </div>
+                <div id="stage-actions" class="stage-actions"></div>
+              </header>
+
+              <div id="stage-progress" class="stage-progress"></div>
+              <div id="stage-body" class="stage-body"></div>
             </div>
           </section>
         </section>
@@ -215,13 +219,9 @@
     </form>
   </dialog>
 
-  <!-- 刷题入口 -->
-  <dialog id="practice-dialog" class="dialog">
-    <form id="practice-form" class="dialog-form">
-      <header class="dialog-head">
-        <div><h2>刷题</h2><p class="dialog-subtitle">选择本次刷题范围</p></div>
-        <button type="button" class="icon-btn" data-close aria-label="关闭">×</button>
-      </header>
+  <!-- 设置流程模板：由 app.js 注入中间工作区，不再作为弹窗 -->
+  <div id="stage-templates" hidden>
+    <form id="practice-form" class="stage-form">
       <div class="option-list" role="radiogroup" aria-label="刷题范围">
         <label class="option">
           <input class="option-radio" type="radio" name="practice-mode" value="required" checked>
@@ -236,87 +236,62 @@
       </div>
       <p id="practice-hint" class="hint">只有一门课程和教程时，将直接开始必修任务。</p>
       <p id="practice-error" class="form-error" role="alert" hidden></p>
-      <footer class="dialog-foot">
-        <button type="button" class="btn btn-ghost" data-close>取消</button>
+      <footer class="stage-form-foot">
         <button type="submit" class="btn btn-primary" id="practice-submit">开始必修任务</button>
       </footer>
     </form>
-  </dialog>
 
-  <!-- 刷时长：选择计时内容并设置每个练习时长 -->
-  <dialog id="duration-target-dialog" class="dialog">
-    <form id="duration-target-form" class="dialog-form">
-      <header class="dialog-head">
-        <div><h2>选择计时内容与时长</h2><p class="dialog-subtitle">时长会累计到所选学习内容</p></div>
-        <button type="button" class="icon-btn" data-close aria-label="关闭">×</button>
-      </header>
+    <form id="duration-target-form" class="stage-form">
       <div class="selection-toolbar">
         <span class="selection-hint" id="duration-target-count">0 个</span>
         <span class="selection-hint">可多选，同时并行计时（总耗时≈单项最长时长）</span>
       </div>
       <div id="duration-target-options" class="option-list" role="group" aria-label="计时内容"></div>
       <p id="duration-target-summary" class="selection-summary">请选择要累计时长的学习内容（可多选）</p>
-      <label class="field">
-        <span>每个练习时长（秒）</span>
-        <input id="duration-per-practice" type="text" inputmode="numeric" value="30" required
-               aria-describedby="duration-per-practice-hint" placeholder="30 或 10,30">
-      </label>
-      <p id="duration-per-practice-hint" class="hint">填 30 表示每个练习固定 30 秒；填 10,30 表示每个练习在 10~30 秒之间随机。暂停时会停止上报，恢复后继续累计。</p>
-      <p class="hint">学习时长以平台最终统计为准，可能延迟更新。请保持程序运行。</p>
+      <p id="duration-per-practice-hint" class="hint">填 30 表示固定 30 秒；填 10,30 表示随机 10~30 秒。</p>
+      <p class="hint">学习时长以平台最终统计为准。请保持程序运行。</p>
       <p id="duration-target-error" class="form-error" role="alert" hidden></p>
-      <footer class="dialog-foot">
-        <button type="button" class="btn btn-ghost" data-close>取消</button>
+      <footer class="stage-form-foot duration-action-bar">
+        <label class="duration-input-group">
+          <span>每项时长（秒）</span>
+          <input id="duration-per-practice" type="text" inputmode="numeric" value="30" required
+                 aria-describedby="duration-per-practice-hint" placeholder="30 或 10,30">
+        </label>
         <button type="submit" class="btn btn-primary" id="duration-target-submit" disabled>开始并行计时</button>
       </footer>
     </form>
-  </dialog>
 
-  <!-- 选择课程 -->
-  <dialog id="course-dialog" class="dialog dialog-wide">
-    <form id="course-form" class="dialog-form">
-      <header class="dialog-head">
-        <div><span class="dialog-kicker">课程目录</span><h2>选择课程与教程</h2><p id="course-next-hint" class="dialog-subtitle"></p></div>
-        <button type="button" class="icon-btn" data-close aria-label="关闭">×</button>
-      </header>
+    <form id="course-form" class="stage-form">
       <div class="directory-selection">
         <div class="selection-toolbar">
           <label class="search-control">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="5.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M15 15l4 4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
             <input id="course-search" type="search" aria-label="筛选课程或教程" placeholder="筛选课程或教程">
           </label>
-          <span class="selection-hint">选择课程后，继续选择教程</span>
+          <span class="selection-hint">点课程展开教程，再选教程</span>
         </div>
-        <div class="course-grid">
-          <section class="directory-column">
-            <header class="directory-column-head"><h3>1. 选择课程</h3><span id="course-option-count" class="directory-count">0</span></header>
-            <div id="course-options" class="option-list" role="radiogroup" aria-label="课程"></div>
-          </section>
-          <section class="directory-column">
-            <header class="directory-column-head"><h3>2. 选择教程</h3><span id="resource-option-count" class="directory-count">0</span></header>
-            <div id="resource-options" class="option-list" role="radiogroup" aria-label="教程"></div>
-          </section>
+        <div class="course-tree">
+          <header class="directory-column-head">
+            <h3>选择课程与教程</h3>
+            <span id="course-option-count" class="directory-count">0 门</span>
+          </header>
+          <div id="course-options" class="option-list course-tree-list" role="group" aria-label="课程与教程"></div>
         </div>
       </div>
+      <p id="course-next-hint" class="dialog-subtitle"></p>
       <p id="course-selection-summary" class="selection-summary" role="status">请选择一门课程，再选择教程</p>
       <p id="course-error" class="form-error" role="alert" hidden></p>
-      <footer class="dialog-foot">
-        <button type="button" class="btn btn-ghost" data-close>取消</button>
+      <footer class="stage-form-foot">
         <button type="submit" class="btn btn-primary" id="course-submit" disabled>确认并开始必修</button>
       </footer>
     </form>
-  </dialog>
 
-  <!-- 全目录刷题 -->
-  <dialog id="catalog-dialog" class="dialog dialog-directory">
-    <form id="catalog-form" class="dialog-form">
-      <header class="dialog-head catalog-dialog-head">
-        <div>
-          <span class="dialog-kicker">练习目录</span>
-          <h2>选择练习内容</h2>
-          <p id="catalog-context" class="dialog-subtitle">按单元和小节筛选未完成题目</p>
-        </div>
-        <button type="button" class="icon-btn" data-close aria-label="关闭">×</button>
-      </header>
+    <form id="catalog-form" class="stage-form stage-form-catalog">
+      <div class="stage-form-heading">
+        <span class="dialog-kicker">练习目录</span>
+        <h3>选择练习内容</h3>
+        <p id="catalog-context" class="dialog-subtitle">按单元和小节筛选未完成题目</p>
+      </div>
       <div class="catalog-workbench">
         <section class="catalog-nav-panel" aria-labelledby="catalog-nav-title">
           <header class="catalog-pane-head">
@@ -340,7 +315,7 @@
               <option value="blocked">不可练习</option>
             </select>
           </div>
-            <div id="catalog-tree" class="catalog-tree" role="group" aria-label="题目目录"></div>
+          <div id="catalog-tree" class="catalog-tree" role="group" aria-label="题目目录"></div>
           <div id="catalog-nav-empty" class="catalog-no-result" hidden>没有匹配的目录</div>
         </section>
 
@@ -370,14 +345,12 @@
         </section>
       </div>
       <p id="catalog-error" class="form-error" role="alert" hidden></p>
-      <footer class="dialog-foot catalog-dialog-foot">
-        <button type="button" class="btn btn-ghost" data-close>取消</button>
+      <footer class="stage-form-foot catalog-dialog-foot">
         <button type="submit" class="btn btn-primary" id="catalog-start">开始刷题</button>
       </footer>
     </form>
-  </dialog>
+  </div>
 
-  <!-- 任务管理 -->
   <dialog id="manage-dialog" class="dialog">
     <div class="dialog-form">
       <header class="dialog-head">
