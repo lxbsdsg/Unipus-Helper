@@ -171,26 +171,51 @@ function toast(message, kind = 'info') {
   setTimeout(() => item.remove(), 6000);
 }
 
-let confirmResolve = null;
+// 每次确认框用一份独立的会话对象，close 事件只允许 settle 它自己那一份。
+// 这样即便 dialog.close() 的 close 事件（宏任务）延迟派发到下一次弹窗打开
+// 之后，也只会误伤已经 settle 过的旧会话，不会清空新 resolver。
+let confirmSession = null;
+// dialog.close() 之后 dialog.open 立刻是 false，但 close 事件要等一个宏任务。
+// 这段时间内重开会让上一次的 close 事件派发到新弹窗上，因此用这个标记把
+// 新调用挡到下个宏任务，避免出现“弹窗开着却等不到 resolver”的僵局。
+let confirmClosing = false;
 
-function settleConfirm(value) {
-  const resolve = confirmResolve;
-  confirmResolve = null;
-  if (resolve) resolve(value);
+function settleConfirm(session, value) {
+  if (!session || session.settled) return;
+  session.settled = true;
+  if (confirmSession === session) confirmSession = null;
+  session.resolve(value);
 }
 
 function confirmAction(title, message, okLabel) {
   const dialog = $('#confirm-dialog');
-  // 已有弹窗打开时不能重复 showModal（会抛错并遗留 resolver）；
-  // 直接拒绝后到的调用，保护先到的 await 不被覆盖、in-flight 状态不悬空。
-  if (dialog.open) return Promise.resolve(false);
+  // 已有确认框在等待用户操作、或上一次关闭还没走完 close 事件时，
+  // 直接拒绝后到的调用，保证先到的 await 不被覆盖。
+  if (confirmSession || confirmClosing) return Promise.resolve(false);
+  const session = { resolve: null, settled: false };
+  confirmSession = session;
   $('#confirm-title').textContent = title;
   $('#confirm-message').textContent = message;
   $('#confirm-ok').textContent = okLabel || '确认';
   dialog.showModal();
   return new Promise((resolve) => {
-    confirmResolve = resolve;
+    session.resolve = resolve;
   });
+}
+
+// 关闭弹窗并把结果交给发起这次确认的会话；重复调用是幂等的。
+function resolveConfirm(value) {
+  const session = confirmSession;
+  const dialog = $('#confirm-dialog');
+  if (dialog.open) {
+    dialog.close();
+    confirmClosing = true;
+    // close 事件派发后即可再次打开，语义与用户连续操作一致。
+    setTimeout(() => {
+      confirmClosing = false;
+    }, 0);
+  }
+  settleConfirm(session, value);
 }
 
 /* ------------------------------------------------------------ 任务渲染 */
@@ -1649,10 +1674,17 @@ function renderCatalogNode(node, depth) {
     const details = document.createElement('details');
     details.className = 'catalog-group';
     details.dataset.nodeKey = nodeKey;
-    details.open = state.catalogQuery.trim() || state.catalogGroupsOpen.get(nodeKey) ||
-      state.catalogFilter !== 'all' ||
-      (!state.catalogCollapsed && (state.catalogCurrentKey === nodeKey ||
-        isCatalogAncestor(nodeKey, state.catalogCurrentKey) || depth === 0));
+    // 收起状态必须优先于搜索/筛选的强制展开，否则“收起全部目录”在
+    // 有查询条件下会变成只改标签的空操作。
+    if (state.catalogCollapsed) {
+      details.open = Boolean(state.catalogGroupsOpen.get(nodeKey));
+    } else {
+      details.open = Boolean(
+        state.catalogQuery.trim() || state.catalogFilter !== 'all' ||
+        state.catalogGroupsOpen.get(nodeKey) || state.catalogCurrentKey === nodeKey ||
+        isCatalogAncestor(nodeKey, state.catalogCurrentKey) || depth === 0
+      );
+    }
 
     const summary = document.createElement('summary');
     summary.style.setProperty('--depth', String(depth));
@@ -1898,6 +1930,12 @@ function collapseCatalog() {
     // 收起时清掉手动展开记录，让 renderCatalogNode 的单一推导结果为准，
     // 否则 catalogGroupsOpen 会让刚刚收起的分组立即重新展开。
     state.catalogGroupsOpen.clear();
+  } else {
+    // 展开必须恢复“整棵树都展开”的语义：仅靠 renderCatalogNode 的
+    // depth===0 推导会让嵌套分组保持关闭。
+    for (const key of state.catalogNodeByKey.keys()) {
+      state.catalogGroupsOpen.set(key, true);
+    }
   }
   // 展开/收起状态只由 renderCatalogNode 根据 catalogCollapsed 推导，
   // 这里统一重渲染，避免 DOM 与状态两处真相漂移。
@@ -2608,16 +2646,11 @@ function bindEvents() {
     applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
   });
 
-  $('#confirm-ok').addEventListener('click', () => {
-    $('#confirm-dialog').close();
-    settleConfirm(true);
-  });
-  $('#confirm-cancel').addEventListener('click', () => {
-    $('#confirm-dialog').close();
-    settleConfirm(false);
-  });
+  $('#confirm-ok').addEventListener('click', () => resolveConfirm(true));
+  $('#confirm-cancel').addEventListener('click', () => resolveConfirm(false));
+  // Escape 或点击 backdrop 关闭时走这里，作为兜底（resolveConfirm 幂等）
   $('#confirm-dialog').addEventListener('close', () => {
-    settleConfirm(false);
+    if (confirmSession) settleConfirm(confirmSession, false);
   });
 
   document.addEventListener('click', (event) => {
