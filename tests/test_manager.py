@@ -156,3 +156,26 @@ def test_restart_preserves_practice_mode(tmp_path):
 
     assert manager.restart(snapshot["id"]) is True
     assert task.practice_mode == "catalog"
+
+
+def test_restart_duration_drops_duration_param(tmp_path, monkeypatch):
+    """重试时长任务必须重新设置每项时长，不能沿用旧 duration_param。
+
+    否则 _prepare_and_learn_duration 的 needs_duration_choice 判定会因
+    duration_param 非空而跳过 CHOOSE_DURATION，用户再也没有修改入口。
+    """
+    manager = make_manager(tmp_path)
+    snapshot = manager.create_task(username="u", password="p")
+    task = manager._wait_ready(snapshot["id"], timeout=2)
+    task.practice_mode = "duration"
+    task.duration_param = 30
+
+    captured = {}
+    monkeypatch.setattr(
+        task,
+        "start_duration",
+        lambda duration_param=None: captured.update(param=duration_param) or True,
+    )
+
+    assert manager.restart(snapshot["id"]) is True
+    assert captured["param"] is None

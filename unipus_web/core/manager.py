@@ -189,7 +189,6 @@ class TaskManager:
         if task.status is Status.INITIALIZING:
             return False
         mode = task.practice_mode
-        duration_param = task.duration_param
         task.request_stop()
         worker = task._worker
         if worker is not None and worker.is_alive():
@@ -197,7 +196,11 @@ class TaskManager:
             if worker.is_alive():
                 return False
         if mode == "duration":
-            return task.start_duration(duration_param=duration_param or None)
+            # 不沿用旧的 duration_param：重试必须重新经过“设置每项时长”，
+            # 否则 _prepare_and_learn_duration 的 needs_duration_choice 判定
+            # 会因 duration_param 非空而跳过 CHOOSE_DURATION，用户再也没有
+            # 修改入口（choose_duration 在 RUNNING 状态也会 409）。
+            return task.start_duration(duration_param=None)
         return task.start(practice_mode=mode)
 
     def choose_course(self, task_id: str, course_id: int, resource_id: int) -> bool:

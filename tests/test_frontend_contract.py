@@ -125,6 +125,17 @@ def test_required_elements_and_endpoints_exist():
     assert "state.courseSelection.loaded" in js
     assert "state.courseRequestId" in js
     assert "openCourse(taskId, { mounted: true });\n    pollDurationCourseList" not in js
+    # 时长模式步骤列表没有“选择刷题范围”，NEED_OPERATION 下标必须按模式区分
+    assert "needOperationStep" in js
+    # 计时内容单元 key 必须单一推导（unit_id 空串也回退到 label），三处分组一致
+    assert "function durationTargetUnitKey" in js
+    assert js.count("durationTargetUnitKey(target)") >= 2
+    assert "group.unit_id || group.label" not in js
+    # 目录收起必须真实生效：重渲染由状态推导，不再直接改 details.open
+    assert "renderCatalogNavigation(true)" in js
+    # 确认弹窗重叠时后到的调用直接拒绝，先到 await 不被覆盖
+    assert "function settleConfirm" in js
+    assert "if (dialog.open) return Promise.resolve(false)" in js
 
 
 def test_no_inline_external_scripts():

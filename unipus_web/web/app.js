@@ -173,11 +173,21 @@ function toast(message, kind = 'info') {
 
 let confirmResolve = null;
 
+function settleConfirm(value) {
+  const resolve = confirmResolve;
+  confirmResolve = null;
+  if (resolve) resolve(value);
+}
+
 function confirmAction(title, message, okLabel) {
+  const dialog = $('#confirm-dialog');
+  // 已有弹窗打开时不能重复 showModal（会抛错并遗留 resolver）；
+  // 直接拒绝后到的调用，保护先到的 await 不被覆盖、in-flight 状态不悬空。
+  if (dialog.open) return Promise.resolve(false);
   $('#confirm-title').textContent = title;
   $('#confirm-message').textContent = message;
   $('#confirm-ok').textContent = okLabel || '确认';
-  $('#confirm-dialog').showModal();
+  dialog.showModal();
   return new Promise((resolve) => {
     confirmResolve = resolve;
   });
@@ -339,11 +349,16 @@ function renderRailModes(task) {
     : mode === 'catalog'
       ? ['选择刷题范围', '选择课程与教程', '勾选练习题目', '后台完成题目']
       : ['选择刷题范围', '选择课程与教程', '后台完成必修'];
+  // 注意：时长模式的步骤列表里没有“选择刷题范围”，下标整体比刷题模式小 1。
+  const needOperationStep =
+    mode === 'duration'
+      ? task.user_operation === 'CHOOSE_DURATION' ? 1 : 0
+      : task.user_operation === 'CHOOSE_PRACTICE' ? 2 : 1;
   const currentStep =
     task.status === 'READY'
       ? 0
       : task.status === 'NEED_OPERATION'
-      ? task.user_operation === 'CHOOSE_PRACTICE' ? 2 : 1
+      ? needOperationStep
       : task.status === 'RUNNING'
         ? mode === 'duration'
           // 读取目录时仍停在“选择计时内容”，避免进度条跳到已完成的最后一步。
@@ -995,9 +1010,7 @@ function openDurationTarget(taskId, options = {}) {
     const match = task.duration_targets.find((t) => t.group_id === selected.group_id);
     if (match) {
       state.durationTargetSelection.add(match);
-      state.durationTargetUnitSelection.add(
-        String(match.unit_id != null ? match.unit_id : durationTargetUnitLabel(match)),
-      );
+      state.durationTargetUnitSelection.add(durationTargetUnitKey(match));
     }
   }
   const form = enterStage(taskId, 'duration-target', 'duration-target-form', options.host || null);
@@ -1023,8 +1036,18 @@ function durationTargetUnitLabel(target) {
   return target.unit_id || '单元';
 }
 
+// 分组 key 的单一推导入口：unit_id 为 null/undefined/空串 时回退到显示名。
+// renderDurationTargets / durationEffectiveTargets / openDurationTarget 都用它。
+function durationTargetUnitKey(target) {
+  return String(
+    target.unit_id != null && target.unit_id !== '' ? target.unit_id : durationTargetUnitLabel(target),
+  );
+}
+
+// 与 renderDurationTargets / durationEffectiveTargets / openDurationTarget 的
+// 分组 key 推导保持一致：unit_id 为空串时也必须落到 label，不能混入 ""。
 function durationUnitKey(group) {
-  return String(group.unit_id || group.label);
+  return String(group.unit_id != null && group.unit_id !== '' ? group.unit_id : group.label);
 }
 
 function setDurationUnitSelection(group, checked) {
@@ -1064,7 +1087,7 @@ function renderDurationTargets(targets) {
   box.textContent = '';
   const groups = new Map();
   for (const target of targets) {
-    const key = String(target.unit_id != null ? target.unit_id : durationTargetUnitLabel(target));
+    const key = durationTargetUnitKey(target);
     if (!groups.has(key)) groups.set(key, { unit_id: key, label: durationTargetUnitLabel(target), items: [] });
     groups.get(key).items.push(target);
   }
@@ -1133,7 +1156,7 @@ function renderDurationTargets(targets) {
 function durationEffectiveTargets(targets) {
   const groups = new Map();
   for (const target of targets) {
-    const key = String(target.unit_id != null ? target.unit_id : durationTargetUnitLabel(target));
+    const key = durationTargetUnitKey(target);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(target);
   }
@@ -1871,15 +1894,14 @@ function toggleCatalogCurrent(checked) {
 
 function collapseCatalog() {
   state.catalogCollapsed = !state.catalogCollapsed;
-  const expand = !state.catalogCollapsed;
-  $$('.catalog-group', $('#catalog-tree')).forEach((details) => {
-    if (expand) details.open = true;
-  });
   if (state.catalogCollapsed) {
-    $$('#catalog-tree > .catalog-row > .catalog-group').forEach((details) => {
-      details.open = true;
-    });
+    // 收起时清掉手动展开记录，让 renderCatalogNode 的单一推导结果为准，
+    // 否则 catalogGroupsOpen 会让刚刚收起的分组立即重新展开。
+    state.catalogGroupsOpen.clear();
   }
+  // 展开/收起状态只由 renderCatalogNode 根据 catalogCollapsed 推导，
+  // 这里统一重渲染，避免 DOM 与状态两处真相漂移。
+  renderCatalogNavigation(true);
   $('#catalog-collapse').setAttribute(
     'aria-label',
     state.catalogCollapsed ? '展开全部目录' : '收起全部目录'
@@ -2588,17 +2610,14 @@ function bindEvents() {
 
   $('#confirm-ok').addEventListener('click', () => {
     $('#confirm-dialog').close();
-    if (confirmResolve) confirmResolve(true);
-    confirmResolve = null;
+    settleConfirm(true);
   });
   $('#confirm-cancel').addEventListener('click', () => {
     $('#confirm-dialog').close();
-    if (confirmResolve) confirmResolve(false);
-    confirmResolve = null;
+    settleConfirm(false);
   });
   $('#confirm-dialog').addEventListener('close', () => {
-    if (confirmResolve) confirmResolve(false);
-    confirmResolve = null;
+    settleConfirm(false);
   });
 
   document.addEventListener('click', (event) => {
