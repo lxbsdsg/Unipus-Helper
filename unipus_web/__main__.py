@@ -54,7 +54,12 @@ def run(
     proxy: str | None = None,
 ) -> None:
     actual_port = pick_port(host, port)
-    if port is None and actual_port not in PORT_RANGE:
+    if port is not None and actual_port != port:
+        print(
+            f"提示：指定端口 {port} 不可用，已自动改用 {actual_port}。",
+            flush=True,
+        )
+    elif port is None and actual_port not in PORT_RANGE:
         print(
             f"提示：{PORT_RANGE.start}-{PORT_RANGE.stop - 1} 端口不可用"
             f"（可能被占用或被 Windows 保留），已自动改用 {actual_port}。",

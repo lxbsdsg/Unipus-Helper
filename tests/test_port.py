@@ -74,3 +74,14 @@ def test_automatic_fallback_port_still_warns(monkeypatch, capsys):
 
     assert "8765-8799 端口不可用" in capsys.readouterr().out
     assert started == {"host": "127.0.0.1", "port": 18789}
+
+
+def test_occupied_explicit_port_warns_about_substitution(monkeypatch, capsys):
+    started = _mock_run_environment(monkeypatch, 8766)
+
+    entry.run("127.0.0.1", 9000, open_browser=False)
+
+    out = capsys.readouterr().out
+    assert "指定端口 9000 不可用" in out
+    assert "8766" in out
+    assert started == {"host": "127.0.0.1", "port": 8766}

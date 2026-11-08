@@ -2090,6 +2090,11 @@ function handleEvent(event) {
       if (!state.stageTaskId) state.stageTaskId = task.id;
       renderTasks();
       maybeRemember(task);
+      // 关键状态变化（进入/离开 NEED_OPERATION、READY）后主动重绘工作台，
+      // 不依赖调用方先刷新快照，避免 WS 路径下表单迟迟不出现。
+      if (state.stageTaskId === task.id && stageViewForTask(task) !== state.stageView) {
+        renderStage();
+      }
       if (task.status === 'ERROR') {
         state.pendingRemember.delete(task.id);
         toast(`${task.name || task.username || task.id}：${task.error || task.description}`, 'error');
@@ -2102,6 +2107,8 @@ function handleEvent(event) {
       if (!id) return;
       state.tasks.delete(id);
       renderTasks();
+      // 当前工作台任务被删除时立即清空 stage，避免继续渲染幽灵任务。
+      if (state.stageTaskId === id) setStage(null);
       if (state.activeTaskId === id && $('#manage-dialog').open) $('#manage-dialog').close();
       break;
     }
