@@ -38,7 +38,7 @@ from .core.task import Status, UserOperation
 from .credentials import CredentialStore
 from .events import EventBus
 from .logging_setup import LogStore, setup_logging
-from .models import parse_duration_param
+from .models import parse_duration_param, parse_score_param
 from .network_log import NetworkRecorder, redact_record
 
 logger = logging.getLogger(__name__)
@@ -70,6 +70,16 @@ class ChoosePracticeRequest(BaseModel):
 
 class StartDurationRequest(BaseModel):
     """进入刷时长模式；具体时长在选定计时内容时通过 duration/choose 提供。"""
+
+
+class StartPracticeRequest(BaseModel):
+    # "100"（固定满分）或 "70,100"（随机范围）
+    score: str | None = None
+
+
+class StartCatalogRequest(BaseModel):
+    # "100"（固定满分）或 "70,100"（随机范围）
+    score: str | None = None
 
 
 class ChooseDurationRequest(BaseModel):
@@ -190,9 +200,17 @@ def create_app(
         return task
 
     @app.post("/api/tasks/{task_id}/start")
-    def start_task(task_id: str):
+    def start_task(task_id: str, payload: StartPracticeRequest | None = None):
         require_task(task_id)
-        return {"ok": manager.start(task_id)}
+        score_param = None
+        if payload is not None and payload.score and payload.score.strip():
+            try:
+                score_param = parse_score_param(payload.score)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+        if not manager.start(task_id, score_param=score_param):
+            raise HTTPException(409, "任务当前无法开始刷题")
+        return {"ok": True}
 
     @app.post("/api/tasks/{task_id}/pause")
     def pause_task(task_id: str):
@@ -272,9 +290,17 @@ def create_app(
         return Response(status_code=204)
 
     @app.post("/api/tasks/{task_id}/catalog", status_code=202)
-    def start_catalog(task_id: str):
+    def start_catalog(
+        task_id: str, payload: StartCatalogRequest | None = None
+    ):
         require_task(task_id)
-        if not manager.start_catalog(task_id):
+        score_param = None
+        if payload is not None and payload.score and payload.score.strip():
+            try:
+                score_param = parse_score_param(payload.score)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+        if not manager.start_catalog(task_id, score_param=score_param):
             raise HTTPException(409, "任务当前无法开始全目录刷题")
         return {"ok": True}
 

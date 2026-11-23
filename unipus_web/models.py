@@ -86,6 +86,83 @@ def as_str(value: Any, default: str = "") -> str:
 DURATION_MAX_SECONDS = 86_400
 
 
+def validate_score_param(param: Any) -> int | tuple[int, int]:
+    """校验刷题得分参数，返回归一化后的值。
+
+    int           -> 固定得分（0~100）
+    (lo, hi)      -> 每题在 lo~hi 之间随机取一个得分
+    """
+    if isinstance(param, tuple):
+        if len(param) != 2:
+            raise ValueError("得分范围格式为 (最小值, 最大值)")
+        lo, hi = param
+        if not isinstance(lo, int) or not isinstance(hi, int):
+            raise ValueError("得分必须是 0~100 的整数或 (最小值, 最大值)")
+    elif isinstance(param, int) and not isinstance(param, bool):
+        lo = hi = param
+    else:
+        raise ValueError("得分必须是 0~100 的整数或 (最小值, 最大值)")
+    if lo < 0 or hi < 0:
+        raise ValueError("得分不能小于 0")
+    if lo > hi:
+        raise ValueError("范围下限不能大于上限")
+    if hi > 100:
+        raise ValueError("得分不能超过 100")
+    return param
+
+
+def parse_score_param(text: Any) -> int | tuple[int, int]:
+    """把用户输入解析为刷题得分参数。
+
+    支持比例写法：
+    "1"      -> 100              固定满分
+    "0.7"    -> 70               固定 70%
+    "0.7,1"  -> (70, 100)        随机 70%~100%
+
+    同时兼容旧的百分比写法：
+    "100"    -> 100
+    "70,100" -> (70, 100)
+    """
+    raw = str(text if text is not None else "").strip()
+    if not raw:
+        raise ValueError("请输入正确率比例，例如 1 或 0.7,1")
+
+    def component_to_percent(part: str) -> int:
+        part = part.strip()
+        if not part:
+            raise ValueError("正确率比例不能为空")
+        if "." in part:
+            try:
+                ratio = float(part)
+            except ValueError:
+                raise ValueError("正确率比例必须是数字，例如 1 或 0.7,1") from None
+            if ratio < 0 or ratio > 1:
+                raise ValueError("比例必须在 0~1 之间，例如 0.7")
+            return round(ratio * 100)
+        try:
+            value = int(part)
+        except ValueError:
+            raise ValueError("正确率比例必须是数字，例如 1 或 0.7,1") from None
+        # 0~1 的整数按比例理解，因此 1 = 100%。
+        if 0 <= value <= 1:
+            return value * 100
+        if value < 0 or value > 100:
+            raise ValueError("正确率比例不能超过 100%")
+        return value
+
+    if "," in raw:
+        parts = [part.strip() for part in raw.split(",")]
+        if len(parts) != 2:
+            raise ValueError("比例范围格式为 最小值,最大值，例如 0.7,1")
+        param: int | tuple[int, int] = (
+            component_to_percent(parts[0]),
+            component_to_percent(parts[1]),
+        )
+    else:
+        param = component_to_percent(raw)
+    return validate_score_param(param)
+
+
 def validate_duration_param(param: Any) -> int | tuple[int, int]:
     """校验每个练习的时长参数，返回归一化后的值。
 
@@ -228,6 +305,8 @@ class TaskSnapshot:
     school_name: str = ""
     user_operation: str | None = None
     practice_mode: str = "required"
+    # 每题目标得分原样回显："100"（固定满分）或 "70,100"（随机范围）
+    score_param: str = ""
     # 每个练习的时长参数原样回显："30"（固定秒）或 "10,30"（随机范围）
     duration_param: str = ""
     duration_targets: list[dict] = field(default_factory=list)

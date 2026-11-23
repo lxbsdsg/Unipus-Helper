@@ -1,4 +1,5 @@
 import json
+import logging
 
 import unipus_web.core.learn as learn_module
 
@@ -116,6 +117,62 @@ class FakeClient:
 
     def get_course_list(self):
         return {"success": True, "value": {"courseList": self.course_list}}
+
+
+def test_submit_logs_score(caplog):
+    client = FakeClient()
+    control = FakeControl()
+    with caplog.at_level(logging.INFO, logger="unipus_web.core.learn"):
+        learn_module._submit_with_retry(
+            control,
+            client,
+            "{}",
+            "t1",
+            "ci",
+            learn_module.SubmitThrottle(),
+        )
+
+    assert "任务 t1 提交成功，本次得分：100%" in caplog.text
+
+
+def test_apply_target_score_replaces_answers_to_hit_score(monkeypatch):
+    from unipus_web.core.course_detail import QuestionType
+
+    answers = [["A", "B", "C", "D", "A", "B", "C", "D"]]
+    monkeypatch.setattr(
+        learn_module.random,
+        "sample",
+        lambda population, k: population[:k],
+    )
+    result = learn_module._apply_target_score(
+        answers,
+        [QuestionType.SINGLE_CHOICE],
+        75,
+    )
+    assert result[0][:2] == ["B", "A"]
+    assert result[0][2:] == ["C", "D", "A", "B", "C", "D"]
+
+
+def test_apply_target_score_ignores_full_score_and_non_adjustable_types():
+    from unipus_web.core.course_detail import QuestionType
+
+    answers = [["A", "B", "C"]]
+    assert (
+        learn_module._apply_target_score(
+            answers,
+            [QuestionType.SINGLE_CHOICE],
+            100,
+        )
+        == answers
+    )
+    assert (
+        learn_module._apply_target_score(
+            answers,
+            [QuestionType.SHORT_ANSWER],
+            70,
+        )
+        == answers
+    )
 
 
 def test_returns_completed_when_total_progress_is_100():

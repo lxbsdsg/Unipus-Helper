@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import random
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -90,6 +91,67 @@ def _skip(control, summary: LearnSummary, reason: str) -> None:
     logger.info("Task skipped: %s", reason)
 
 
+def _generate_score(param: int | tuple[int, int] | None) -> int:
+    if isinstance(param, tuple):
+        return random.randint(param[0], param[1])
+    if isinstance(param, int):
+        return param
+    return 100
+
+
+_SCORE_ADJUSTABLE_TYPES = {
+    QuestionType.SINGLE_CHOICE,
+    QuestionType.MATERIAL_BANKED_CLOZE,
+    QuestionType.SEQUENCE,
+    QuestionType.BASIC_SCOOP_CONTENT,
+}
+
+
+def _wrong_answer(value: str, qtype: QuestionType) -> str:
+    """为客观题生成一个可靠的非正确答案。"""
+    text = as_str(value).strip()
+    if len(text) == 1 and text.isalpha():
+        letter = text.upper()
+        return "A" if letter != "A" else "B"
+    return "__wrong__"
+
+
+def _apply_target_score(
+    answers: list[list[str]],
+    question_types: list[QuestionType],
+    target_score: int,
+) -> list[list[str]]:
+    """按目标得分把部分答案替换为错误答案，服务端按实际正确率判分。"""
+    if target_score >= 100 or not answers:
+        return answers
+
+    flat: list[tuple[int, int, str, QuestionType]] = []
+    for i, group in enumerate(answers):
+        qtype = question_types[i] if i < len(question_types) else QuestionType.UNKNOWN
+        for j, value in enumerate(group):
+            flat.append((i, j, value, qtype))
+
+    adjustable = [
+        index
+        for index, (_, _, _, qtype) in enumerate(flat)
+        if qtype in _SCORE_ADJUSTABLE_TYPES
+    ]
+    if not adjustable:
+        return answers
+
+    total = len(flat)
+    correct_count = max(0, min(total, round(total * target_score / 100)))
+    wrong_count = min(total - correct_count, len(adjustable))
+    if wrong_count <= 0:
+        return answers
+
+    wrong_indices = set(random.sample(adjustable, wrong_count))
+    for index in wrong_indices:
+        i, j, value, qtype = flat[index]
+        answers[i][j] = _wrong_answer(value, qtype)
+    return answers
+
+
 def load_course_context(control, client, resource: CourseResource) -> CourseContext:
     """拉取教程信息、完整课程树与老师勾选的必修任务。"""
     control.checkpoint()
@@ -144,6 +206,7 @@ def learn_course(
     resource: CourseResource,
     *,
     allow_multi_question: bool = True,
+    score_param: int | tuple[int, int] | None = None,
 ) -> LearnSummary:
     summary = LearnSummary()
     throttle = SubmitThrottle()
@@ -197,6 +260,7 @@ def learn_course(
             required_map,
             summary,
             allow_multi_question=allow_multi_question,
+            score_param=score_param,
             throttle=throttle,
         ):
             summary.completed_units += 1
@@ -324,6 +388,7 @@ def learn_selected_tasks(
     *,
     progress: dict[str, float] | None = None,
     allow_multi_question: bool = True,
+    score_param: int | tuple[int, int] | None = None,
 ) -> LearnSummary:
     """只刷用户勾选的题目；已完成或状态未知的题目直接跳过。"""
     summary = LearnSummary()
@@ -377,6 +442,7 @@ def learn_selected_tasks(
                 context.course_instance_id,
                 context.resource_id,
                 allow_multi_question=allow_multi_question,
+                score_param=score_param,
                 summary=summary,
                 throttle=throttle,
             )
@@ -397,6 +463,7 @@ def _learn_unit(
     summary: LearnSummary,
     *,
     allow_multi_question: bool,
+    score_param: int | tuple[int, int] | None,
     throttle: SubmitThrottle,
 ) -> bool:
     user = control.user
@@ -453,6 +520,7 @@ def _learn_unit(
             course_instance_id,
             resource_id,
             allow_multi_question=allow_multi_question,
+            score_param=score_param,
             summary=summary,
             throttle=throttle,
         ):
@@ -471,6 +539,7 @@ def _learn_task(
     resource_id: int,
     *,
     allow_multi_question: bool,
+    score_param: int | tuple[int, int] | None,
     summary: LearnSummary,
     throttle: SubmitThrottle,
 ) -> bool:
@@ -560,6 +629,9 @@ def _learn_task(
             question_types.append(question_type)
 
     control.checkpoint()
+    target_score = _generate_score(score_param)
+    if not is_preset:
+        answers = _apply_target_score(answers, question_types, target_score)
     body = create_submit_body(
         instance_ids,
         answers,
@@ -692,6 +764,12 @@ def _submit_with_retry(
             course_instance_id,
             version,
             score_avg,
+        )
+        logger.info(
+            "任务 %s 提交成功，本次得分：%g%%",
+            task_id,
+            score_avg,
+            extra={"task_id": getattr(control, "task_id", None)},
         )
         return
 

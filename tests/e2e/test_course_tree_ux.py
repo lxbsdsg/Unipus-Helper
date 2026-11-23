@@ -439,3 +439,139 @@ def test_single_duration_target_shows_setting_form(page, base_url):
     page.fill("#duration-per-practice", "45")
     page.wait_for_timeout(200)
     assert not page.evaluate("() => document.getElementById('duration-target-submit').disabled")
+
+
+def _catalog_page(page, base_url):
+    """两级目录（unit → section → 题目），用于验证展开/收起语义。"""
+    tree = {"name": "教程", "type": "book", "units": [
+        {"id": "u1", "role": "unit", "caption": "Unit 1", "name": "U1", "children": [
+            {"id": "s1", "role": "section", "caption": "Section 1", "name": "S1", "children": [
+                {"id": "q1", "role": "group", "caption": "题目 01", "name": "Q1",
+                 "question_num": 2, "bases": ["single-choice"], "tab_type": "ex", "required": True,
+                 "answerable": True, "status_known": True, "finish_progress": 0, "selectable": True},
+            ]},
+            {"id": "s2", "role": "section", "caption": "Section 2", "name": "S2", "children": [
+                {"id": "q2", "role": "group", "caption": "题目 02", "name": "Q2",
+                 "question_num": 2, "bases": ["single-choice"], "tab_type": "ex", "required": True,
+                 "answerable": True, "status_known": True, "finish_progress": 0, "selectable": True},
+            ]},
+        ]},
+        {"id": "u2", "role": "unit", "caption": "Unit 2", "name": "U2", "children": [
+            {"id": "s3", "role": "section", "caption": "Section 3", "name": "S3", "children": [
+                {"id": "q3", "role": "group", "caption": "题目 03", "name": "Q3",
+                 "question_num": 2, "bases": ["single-choice"], "tab_type": "ex", "required": True,
+                 "answerable": True, "status_known": True, "finish_progress": 0, "selectable": True},
+            ]},
+        ]},
+    ]}
+    task = task_snapshot(status="NEED_OPERATION", user_operation="CHOOSE_PRACTICE", practice_mode="catalog")
+    install_base_mocks(page, task, [])
+    page.route("**/api/tasks/T1/catalog", lambda r: fulfill_json(r, tree))
+    page.goto(base_url, wait_until="load")
+    page.wait_for_timeout(800)
+    return page
+
+
+def _open_state(page):
+    return page.evaluate(
+        """() => {
+            const out = {};
+            for (const d of document.querySelectorAll('.catalog-group')) {
+                out[d.dataset.nodeKey] = d.open;
+            }
+            return out;
+        }"""
+    )
+
+
+def test_collapse_all_actually_closes_every_group(page, base_url):
+    """收起全部目录必须真的把每个分组关掉，而不是只改按钮标签。"""
+    page = _catalog_page(page, base_url)
+    assert _open_state(page).get("u1") is True
+
+    page.click("#catalog-collapse")
+    page.wait_for_timeout(400)
+
+    state = _open_state(page)
+    assert state == {"u1": False, "u2": False, "s1": False, "s2": False, "s3": False}, state
+    assert page.get_attribute("#catalog-collapse", "aria-label") == "展开全部目录"
+
+
+def test_expand_all_reopens_nested_groups(page, base_url):
+    """展开全部目录必须恢复嵌套分组，不能只展开顶层单元。"""
+    page = _catalog_page(page, base_url)
+    page.click("#catalog-collapse")
+    page.wait_for_timeout(300)
+    assert _open_state(page)["s1"] is False
+
+    page.click("#catalog-collapse")
+    page.wait_for_timeout(400)
+
+    state = _open_state(page)
+    assert all(state.values()), state
+    assert page.get_attribute("#catalog-collapse", "aria-label") == "收起全部目录"
+    # 展开后顶层单元下的题目可见
+    assert page.locator(".catalog-items .catalog-leaf-row").count() > 0
+
+
+def test_collapse_all_works_with_active_filter(page, base_url):
+    """筛选生效时收起同样要生效，不能被强制展开条件覆盖。"""
+    page = _catalog_page(page, base_url)
+    assert page.locator("#catalog-filter option[value='open']").count() == 1
+    page.select_option("#catalog-filter", "open")
+    page.wait_for_timeout(300)
+
+    page.click("#catalog-collapse")
+    page.wait_for_timeout(400)
+
+    state = _open_state(page)
+    assert state, "筛选后目录为空，用例前提不成立"
+    assert not any(state.values()), state
+
+
+def test_overlapping_confirmation_does_not_strand_the_dialog(page, base_url):
+    """确认弹窗重叠时不能卡死：第二次调用立即拒绝，先到的调用正常返回。"""
+    page = _catalog_page(page, base_url)
+    result = page.evaluate(
+        """async () => {
+            const first = confirmAction('A', 'a', 'OK');
+            const second = confirmAction('B', 'b', 'OK');
+            const secondValue = await second;
+            const dialog = document.getElementById('confirm-dialog');
+            const openWhileWaiting = dialog.open;
+            document.getElementById('confirm-ok').click();
+            const firstValue = await first;
+            await new Promise((r) => setTimeout(r, 50));
+            return { firstValue, secondValue, openWhileWaiting, openAfter: dialog.open };
+        }"""
+    )
+    assert result["secondValue"] is False, result
+    assert result["openWhileWaiting"] is True, result
+    assert result["firstValue"] is True, result
+    assert result["openAfter"] is False, result
+
+
+def test_reopening_confirm_right_after_close_does_not_leave_a_stuck_dialog(page, base_url):
+    """close() 的 close 事件（宏任务）未派发前重开确认框，不能留下关不掉的僵局。
+
+    旧实现用全局 resolver：上次的 close 事件会把新 resolver 清空，弹窗停在打开
+    状态且点确认无效。回归时此用例会看到 stuckOpen/finalOpen 为 True。
+    """
+    page = _catalog_page(page, base_url)
+    result = page.evaluate(
+        """async () => {
+            const dialog = document.getElementById('confirm-dialog');
+            const first = confirmAction('A', 'a', 'OK');
+            document.getElementById('confirm-ok').click();
+            const second = confirmAction('B', 'b', 'OK');
+            const secondValue = await second;
+            await new Promise((r) => setTimeout(r, 0));
+            const firstValue = await first;
+            const stuckOpen = dialog.open;
+            return { firstValue, secondValue, stuckOpen, finalOpen: dialog.open };
+        }"""
+    )
+    assert result["firstValue"] is True, result
+    assert result["secondValue"] is False, result
+    assert result["stuckOpen"] is False, result
+    assert result["finalOpen"] is False, result

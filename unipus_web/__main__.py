@@ -54,7 +54,12 @@ def run(
     proxy: str | None = None,
 ) -> None:
     actual_port = pick_port(host, port)
-    if port is None and actual_port not in PORT_RANGE:
+    if port is not None and actual_port != port:
+        print(
+            f"提示：指定端口 {port} 不可用，已自动改用 {actual_port}。",
+            flush=True,
+        )
+    elif port is None and actual_port not in PORT_RANGE:
         print(
             f"提示：{PORT_RANGE.start}-{PORT_RANGE.stop - 1} 端口不可用"
             f"（可能被占用或被 Windows 保留），已自动改用 {actual_port}。",
@@ -106,6 +111,11 @@ def main(argv: list[str] | None = None) -> int:
         help="CLI 模式：加载全部目录，自己选择未完成题目",
     )
     parser.add_argument(
+        "--score",
+        default=None,
+        help="CLI 刷题得分：100（固定）或 70,100（随机范围）",
+    )
+    parser.add_argument(
         "--no-prompt",
         action="store_true",
         help="CLI 模式不交互提问；缺少凭据或多课程时直接失败",
@@ -114,6 +124,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cli:
         from .cli import run_cli
+        from .models import parse_score_param
+
+        score_param = None
+        if args.score:
+            try:
+                score_param = parse_score_param(args.score)
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
 
         return run_cli(
             username=args.username,
@@ -123,6 +142,7 @@ def main(argv: list[str] | None = None) -> int:
             assume_yes=args.yes,
             allow_prompt=not args.no_prompt,
             practice_mode="catalog" if args.catalog else "required",
+            score_param=score_param,
         )
 
     if args.host not in ("127.0.0.1", "localhost", "::1"):

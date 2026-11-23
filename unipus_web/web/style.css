@@ -1311,6 +1311,22 @@ svg {
   margin: 0;
 }
 
+.practice-action-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.practice-action-bar .duration-input-group {
+  flex: none;
+}
+
+.practice-action-bar .duration-input-group input {
+  width: 110px;
+}
+
 .course-tree-list {
   max-height: clamp(168px, 34vh, 320px);
   min-height: 140px;

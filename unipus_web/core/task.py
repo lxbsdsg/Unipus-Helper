@@ -28,6 +28,7 @@ from ..models import (
     User,
     as_str,
     lenient_obj,
+    validate_score_param,
     validate_duration_param,
 )
 
@@ -115,6 +116,8 @@ class Task:
 
         # 任务方式：required = 必修，catalog = 全目录自选，duration = 学习时长
         self.practice_mode = "required"
+        # 每题目标得分：int=固定值；tuple=(最小值, 最大值) 随机
+        self.score_param: int | tuple[int, int] = 100
         # 每个练习的时长参数：int=固定秒数；tuple=(最小值, 最大值) 随机
         self.duration_param: int | tuple[int, int] = 0
         self.duration_targets: list[DurationTarget] = []
@@ -186,7 +189,14 @@ class Task:
             logger.exception("Task %s initialization failed", self.task_id)
             self._fail(f"任务初始化失败：{type(exc).__name__} - {exc}")
 
-    def start(self, *, practice_mode: str = "required") -> bool:
+    def start(
+        self,
+        *,
+        practice_mode: str = "required",
+        score_param: int | tuple[int, int] | None = None,
+    ) -> bool:
+        if score_param is not None:
+            validate_score_param(score_param)
         with self._cond:
             if self.status is not Status.READY:
                 return False
@@ -199,6 +209,8 @@ class Task:
             self.selected_duration_targets = []
             if practice_mode != "duration":
                 self.duration_param = 0
+            if score_param is not None:
+                self.score_param = score_param
             self._generation += 1
             generation = self._generation
             self._stop_event.clear()
@@ -218,9 +230,11 @@ class Task:
         self._worker.start()
         return True
 
-    def start_catalog(self) -> bool:
+    def start_catalog(
+        self, *, score_param: int | tuple[int, int] | None = None
+    ) -> bool:
         """以全目录自选方式开始；进入选择前会先加载目录。"""
-        return self.start(practice_mode="catalog")
+        return self.start(practice_mode="catalog", score_param=score_param)
 
     def start_duration(
         self, *, duration_param: int | tuple[int, int] | None = None
@@ -330,6 +344,7 @@ class Task:
             self.client,
             resource,
             allow_multi_question=self.allow_multi_question,
+            score_param=self.score_param,
         )
 
     def _prepare_and_practice_catalog(self, generation: int, resource):
@@ -360,6 +375,7 @@ class Task:
             context,
             list(self.selected_task_ids),
             allow_multi_question=self.allow_multi_question,
+            score_param=self.score_param,
         )
 
     def _prepare_and_learn_duration(self, generation: int, resource):
@@ -876,6 +892,7 @@ class Task:
                     self.user_operation.value if self.user_operation else None
                 ),
                 practice_mode=self.practice_mode,
+                score_param=self._score_param_text(),
                 duration_param=self._duration_param_text(),
                 duration_targets=[item.to_dict() for item in self.duration_targets],
                 selected_duration_target=(
@@ -898,6 +915,21 @@ class Task:
             return f"{param[0]},{param[1]}"
         if isinstance(param, int) and param > 0:
             return str(param)
+        return ""
+
+    def _score_param_text(self) -> str:
+        param = self.score_param
+
+        def ratio_text(value: int) -> str:
+            if value in (0, 100):
+                return str(value // 100)
+            text = str(value / 100)
+            return text
+
+        if isinstance(param, tuple):
+            return f"{ratio_text(param[0])},{ratio_text(param[1])}"
+        if isinstance(param, int):
+            return ratio_text(param)
         return ""
 
     def _emit_change(self) -> None:
