@@ -93,12 +93,12 @@ class FakeTask:
     def initialize(self):
         self.calls.append("initialize")
 
-    def start(self):
+    def start(self, **kwargs):
         self.calls.append("start")
         self.status = Status.RUNNING
         return True
 
-    def start_catalog(self):
+    def start_catalog(self, **kwargs):
         self.calls.append("start_catalog")
         self.status = Status.RUNNING
         return True

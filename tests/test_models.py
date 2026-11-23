@@ -5,6 +5,7 @@ from unipus_web.models import (
     as_float,
     as_int,
     lenient_obj,
+    parse_score_param,
 )
 
 
@@ -52,3 +53,20 @@ def test_course_to_dict_roundtrip():
     d = c.to_dict()
     assert d["resources"][0]["id"] == 7
     assert d["resources"][0]["total_point_num"] == 9
+
+
+def test_parse_score_param_accepts_fixed_and_range():
+    assert parse_score_param("100") == 100
+    assert parse_score_param("70,100") == (70, 100)
+    assert parse_score_param("0") == 0
+    assert parse_score_param("1") == 100
+    assert parse_score_param("0.7") == 70
+    assert parse_score_param("0.7,1") == (70, 100)
+
+
+def test_parse_score_param_rejects_bad_values():
+    import pytest
+
+    for value in ("", "abc", "70,100,80", "101", "80,70", "-1", "1.2"):
+        with pytest.raises(ValueError):
+            parse_score_param(value)

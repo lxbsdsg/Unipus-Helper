@@ -151,6 +151,7 @@ def run_cli(
     assume_yes: bool = False,
     allow_prompt: bool = True,
     practice_mode: str = "required",
+    score_param: int | tuple[int, int] | None = None,
     task_factory: Callable[..., Task] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     out: Callable[[str], None] = print,
@@ -159,6 +160,7 @@ def run_cli(
     """在终端里完成登录 → 选课 → 学习 → 退出。
 
     practice_mode：required（老师勾选，默认）或 catalog（全目录自选）。
+    score_param：None 使用默认满分，int 为固定得分，tuple 为随机范围。
     返回码：0 完成，1 失败，2 缺少凭据/需要选择，130 用户中断。
     """
     if configure_logging:
@@ -191,7 +193,7 @@ def run_cli(
         out(f"登录成功：{task.name or username}")
 
         starter = task.start_catalog if practice_mode == "catalog" else task.start
-        if not starter():
+        if not starter(score_param=score_param):
             out("任务无法启动。")
             return 1
         out("任务已启动，按 Ctrl+C 停止。")

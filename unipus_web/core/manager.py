@@ -136,11 +136,15 @@ class TaskManager:
 
     # ------------------------------------------------------------ 控制
 
-    def start(self, task_id: str) -> bool:
+    def start(
+        self,
+        task_id: str,
+        score_param: int | tuple[int, int] | None = None,
+    ) -> bool:
         task = self.get(task_id)
         if task is None:
             return False
-        ok = task.start()
+        ok = task.start(score_param=score_param)
         self.bus.publish("task.updated", task.snapshot())
         return ok
 
@@ -152,11 +156,15 @@ class TaskManager:
         self.bus.publish("task.updated", task.snapshot())
         return ok
 
-    def start_catalog(self, task_id: str) -> bool:
+    def start_catalog(
+        self,
+        task_id: str,
+        score_param: int | tuple[int, int] | None = None,
+    ) -> bool:
         task = self.get(task_id)
         if task is None:
             return False
-        ok = task.start_catalog()
+        ok = task.start_catalog(score_param=score_param)
         self.bus.publish("task.updated", task.snapshot())
         return ok
 

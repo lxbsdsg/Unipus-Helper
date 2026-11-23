@@ -235,8 +235,14 @@
         </label>
       </div>
       <p id="practice-hint" class="hint">只有一门课程和教程时，将直接开始必修任务。</p>
+      <p id="practice-score-hint" class="hint">填 1 表示满分；填 0.7,1 表示随机 70%~100%。</p>
       <p id="practice-error" class="form-error" role="alert" hidden></p>
-      <footer class="stage-form-foot">
+      <footer class="stage-form-foot practice-action-bar">
+        <label class="duration-input-group" for="practice-score">
+          <span>正确率比例</span>
+          <input id="practice-score" type="text" inputmode="decimal" value="1" required
+                 aria-describedby="practice-score-hint" placeholder="1 或 0.7,1">
+        </label>
         <button type="submit" class="btn btn-primary" id="practice-submit">开始必修任务</button>
       </footer>
     </form>

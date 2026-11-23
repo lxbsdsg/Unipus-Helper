@@ -815,6 +815,13 @@ function renderManage(task) {
     ['用户', [task.user_name, task.school_name].filter(Boolean).join(' · ') || '—'],
     ['状态', (STATUS[task.status] || { label: task.status }).label],
     ['任务类型', task.practice_mode === 'duration' ? '刷时长' : '刷题'],
+    ['正确率比例', task.practice_mode !== 'duration'
+      ? (task.score_param
+          ? (task.score_param.includes(',')
+              ? `随机 ${task.score_param}`
+              : `${task.score_param}`)
+          : '—')
+      : '—'],
     ['每项时长', task.practice_mode === 'duration'
       ? (task.duration_param
           ? (task.duration_param.includes(',')
@@ -882,8 +889,12 @@ async function manageAction(task, action) {
 
 function openPracticeSetup(taskId, options = {}) {
   state.practiceTaskId = taskId;
+  const task = state.tasks.get(taskId);
   const form = enterStage(taskId, 'practice', 'practice-form', options.host || null);
-  if (form) form.reset();
+  if (form) {
+    form.reset();
+    $('#practice-score').value = task?.score_param || '1';
+  }
   $('#practice-error').hidden = true;
   updatePracticeHint();
 }
@@ -900,16 +911,21 @@ async function submitPracticeForm(event) {
   event.preventDefault();
   const taskId = state.practiceTaskId;
   const chosen = $('input[name="practice-mode"]:checked').value;
+  const score = String($('#practice-score').value || '').trim();
   const action = chosen === 'catalog'
     ? 'catalog' : 'start';
   const submit = $('#practice-submit');
   $('#practice-error').hidden = true;
   submit.disabled = true;
   try {
-    const result = await api(`/api/tasks/${encodeURIComponent(taskId)}/${action}`, { method: 'POST' });
+    const result = await api(`/api/tasks/${encodeURIComponent(taskId)}/${action}`, {
+      method: 'POST',
+      body: { score },
+    });
     if (result?.ok === false) throw new Error('任务当前无法启动，请稍后重试');
     // 立即在本地记录模式，课程选择页的按钮文案与后续提示才不会退回“必修”。
     patchTaskMode(taskId, chosen === 'catalog' ? 'catalog' : 'practice');
+    patchTaskScore(taskId, score);
     await refreshTaskSnapshot(taskId);
     toast(action === 'catalog' ? '正在加载目录，完成后请选择题目' : '任务已启动，请留意课程选择提示', 'success');
   } catch (error) {
@@ -1008,6 +1024,14 @@ function patchTaskMode(taskId, mode) {
   const task = state.tasks.get(taskId);
   if (task && task.practice_mode !== mode) {
     task.practice_mode = mode;
+    state.tasks.set(taskId, task);
+  }
+}
+
+function patchTaskScore(taskId, score) {
+  const task = state.tasks.get(taskId);
+  if (task && task.score_param !== score) {
+    task.score_param = score;
     state.tasks.set(taskId, task);
   }
 }
