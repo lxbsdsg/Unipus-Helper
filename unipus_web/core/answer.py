@@ -52,14 +52,17 @@ def parse_answers(answer_json: str | None) -> list[AnswerRecord]:
         analysis_obj = _decode_inner(data.get("analysis"))
 
         answers: list[str] = []
+        answer_slots: list[str] = []
         all_answers: list[str] = []
         for child in answer_obj.get("children") or []:
             child_data = lenient_obj(child)
             raw_answers = child_data.get("answers")
-            if isinstance(raw_answers, list) and raw_answers:
+            if isinstance(raw_answers, list):
                 values = [as_str(value) for value in raw_answers]
-                answers.append(values[0])
-                all_answers.extend(values)
+                answer_slots.append(values[0] if values else "")
+                if values:
+                    answers.append(values[0])
+                    all_answers.extend(values)
 
         analysis_items: list[str] = []
         for child in analysis_obj.get("children") or []:
@@ -69,6 +72,7 @@ def parse_answers(answer_json: str | None) -> list[AnswerRecord]:
             AnswerRecord(
                 id=as_int(data.get("id")),
                 answers=answers,
+                answer_slots=answer_slots,
                 all_answers=all_answers,
                 analysis_items=analysis_items,
                 analysis=as_str(analysis_obj.get("analysis")),
@@ -78,10 +82,13 @@ def parse_answers(answer_json: str | None) -> list[AnswerRecord]:
 
 
 def extract_answers(answer: AnswerRecord, qtype: QuestionType) -> list[str]:
+    if qtype is QuestionType.BASIC_SCOOP_CONTENT:
+        return list(answer.answer_slots)
     if qtype is QuestionType.VIDEO_POPUP:
         return list(answer.all_answers or answer.answers)
     if qtype in _OBJECTIVE_TYPES:
-        if qtype is QuestionType.TRANSLATION and not answer.answers:
+        has_answer = any(value.strip() for value in answer.answers)
+        if qtype is QuestionType.TRANSLATION and not has_answer:
             return list(answer.analysis_items)
         return list(answer.answers)
     if qtype is QuestionType.SHORT_ANSWER:

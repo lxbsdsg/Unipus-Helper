@@ -175,6 +175,26 @@ def test_apply_target_score_ignores_full_score_and_non_adjustable_types():
     )
 
 
+def test_apply_target_score_does_not_replace_placeholder_blank_answers(monkeypatch):
+    from unipus_web.core.course_detail import QuestionType
+
+    monkeypatch.setattr(
+        learn_module.random,
+        "sample",
+        lambda population, k: population[:k],
+    )
+    answers = [["", "A", "", "B"]]
+    result = learn_module._apply_target_score(
+        answers,
+        [QuestionType.BASIC_SCOOP_CONTENT],
+        50,
+    )
+
+    assert result[0][0] == ""
+    assert result[0][2] == ""
+    assert result[0][1:] == ["B", "", "B"]
+
+
 def test_returns_completed_when_total_progress_is_100():
     control = FakeControl()
     summary = learn_course(control, FakeClient(), CourseResource(id=1))
