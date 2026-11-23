@@ -324,6 +324,7 @@ class TaskSnapshot:
 class AnswerRecord:
     id: int = 0
     answers: list[str] = field(default_factory=list)
+    answer_slots: list[str] = field(default_factory=list)
     all_answers: list[str] = field(default_factory=list)
     analysis_items: list[str] = field(default_factory=list)
     analysis: str = ""

@@ -129,6 +129,8 @@ def _apply_target_score(
     for i, group in enumerate(answers):
         qtype = question_types[i] if i < len(question_types) else QuestionType.UNKNOWN
         for j, value in enumerate(group):
+            if not value.strip():
+                continue
             flat.append((i, j, value, qtype))
 
     adjustable = [
